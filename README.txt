@@ -34,7 +34,7 @@ To play via EGL:
 ./hello_wayland <stream>
 
 To play directly to Wayland:
-./hello_wayland <stream>
+./hello_wayland -d <stream>
 
 To get a full list of options:
 ./hello_wayland -h
