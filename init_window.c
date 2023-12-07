@@ -102,6 +102,7 @@ typedef struct wayland_out_env_s {
 
 // Structure that holds context whilst waiting for fence release
 struct dmabuf_w_env_s {
+    int fd;
     AVBufferRef *buf;
     struct pollqueue *pq;
     struct polltask *pt;
@@ -203,12 +204,13 @@ fmt_list_init(fmt_list_t *const fl, const size_t initial_size)
 // Dmabuf environment passed between callbacks
 
 static struct dmabuf_w_env_s*
-dmabuf_w_env_new(window_ctx_t *const wc, AVBufferRef *const buf)
+dmabuf_w_env_new(window_ctx_t *const wc, AVBufferRef *const buf, const int fd)
 {
     struct dmabuf_w_env_s *const dbe = malloc(sizeof(*dbe));
     if (!dbe)
         return NULL;
 
+    dbe->fd = fd;
     dbe->buf = av_buffer_ref(buf);
     dbe->pq = pollqueue_ref(wc->pq);
     dbe->pt = NULL;
@@ -240,7 +242,6 @@ static void
 w_buffer_release(void *data, struct wl_buffer *wl_buffer)
 {
     struct dmabuf_w_env_s *const dbe = data;
-    const AVDRMFrameDescriptor *const desc = (AVDRMFrameDescriptor *)dbe->buf->data;
 
     // Sent by the compositor when it's no longer using this buffer
     wl_buffer_destroy(wl_buffer);
@@ -249,7 +250,7 @@ w_buffer_release(void *data, struct wl_buffer *wl_buffer)
     // as V4L2 doesn't respect them.
     // * Arguably if we have >1 object we should wait for all but just waiting
     //   for the 1st works fine.
-    dbe->pt = polltask_new(dbe->pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
+    dbe->pt = polltask_new(dbe->pq, dbe->fd, POLLOUT, dmabuf_fence_release_cb, dbe);
     pollqueue_add_task(dbe->pt, -1);
 }
 
@@ -314,7 +315,7 @@ do_display_dmabuf(window_ctx_t *const wc, AVFrame *const frame)
     }
 
     wl_buffer_add_listener(w_buffer, &w_buffer_listener,
-                           dmabuf_w_env_new(wc, frame->buf[0]));
+                           dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd));
 
     wl_surface_attach(wc->surface, w_buffer, 0, 0);
     wp_viewport_set_destination(wc->viewport, wc->req_w, wc->req_h);
@@ -455,7 +456,7 @@ do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
     // A fence is set on the fd by the egl render - we can reuse the buffer once it goes away
     // (same as the direct wayland output after buffer release)
     {
-        struct dmabuf_w_env_s *const dbe = dmabuf_w_env_new(wc, frame->buf[0]);
+        struct dmabuf_w_env_s *const dbe = dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd);
         dbe->pt = polltask_new(dbe->pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
         pollqueue_add_task(dbe->pt, -1);
     }
