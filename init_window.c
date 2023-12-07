@@ -335,7 +335,7 @@ check_support_egl(window_ctx_t *const wc, const uint32_t fmt, const uint64_t mod
     GLint i;
     const uint64_t cmod = canon_mod(mod);
 
-    if (fmt == wc->last_fmt || cmod == wc->last_mod)
+    if (fmt == wc->last_fmt && cmod == wc->last_mod)
         return wc->fmt_ok;
 
     wc->last_fmt = fmt;
