@@ -31,9 +31,11 @@
  * This example shows how to do HW-accelerated decoding with output
  * frames from the HW video surfaces.
  */
+#include "config.h"
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
@@ -51,12 +53,22 @@
 static enum AVPixelFormat hw_pix_fmt;
 static FILE *output_file = NULL;
 static long frames = 0;
+static bool no_wait = false;
 
 static AVFilterContext *buffersink_ctx = NULL;
 static AVFilterContext *buffersrc_ctx = NULL;
 static AVFilterGraph *filter_graph = NULL;
 
 static AVDictionary *codec_opts = NULL;
+
+static int64_t
+time_us()
+{
+    struct timespec ts = {0,0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)(ts.tv_nsec / 1000) + (int64_t)(ts.tv_sec * 1000000);
+
+}
 
 static int hw_decoder_init(AVCodecContext *ctx, const enum AVHWDeviceType type)
 {
@@ -89,8 +101,46 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return AV_PIX_FMT_NONE;
 }
 
-static int decode_write(AVCodecContext * const avctx,
-                        egl_wayland_out_env_t * const dpo,
+static int64_t
+frame_pts(const AVFrame * const frame)
+{
+    return frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : frame->pts;
+}
+
+static void
+display_wait(const AVFrame * const frame, const AVRational time_base)
+{
+    static int64_t base_pts = 0;
+    static int64_t base_now = 0;
+    static int64_t last_conv = 0;
+
+    int64_t now = time_us();
+    int64_t now_delta = now - base_now;
+    int64_t pts = frame_pts(frame);
+    int64_t pts_delta = pts - base_pts;
+    // If we haven't been given any clues then guess 60fps
+    int64_t pts_conv = (pts == AV_NOPTS_VALUE || time_base.den == 0 || time_base.num == 0) ?
+        last_conv + 1000000 / 60 :
+        av_rescale_q(pts_delta, time_base, (AVRational) {1, 1000000});  // frame->timebase seems invalid currently
+    int64_t delta = pts_conv - now_delta;
+
+    last_conv = pts_conv;
+
+//    printf("PTS_delta=%" PRId64 ", Now_delta=%" PRId64 ", TB=%d/%d, Delta=%" PRId64 "\n", pts_delta, now_delta, time_base.num, time_base.den, delta);
+
+    if (delta < 0 || delta > 6000000) {
+        base_pts = pts;
+        base_now = now;
+        return;
+    }
+
+    if (delta > 0)
+        usleep(delta);
+}
+
+static int decode_write(const AVStream * const stream,
+                        AVCodecContext * const avctx,
+                        vid_out_env_t * const dpo,
                         AVPacket *packet)
 {
     AVFrame *frame = NULL, *sw_frame = NULL;
@@ -129,6 +179,7 @@ static int decode_write(AVCodecContext * const avctx,
         }
 
         do {
+            AVRational time_base = stream->time_base;
             if (filter_graph != NULL) {
                 av_frame_unref(frame);
                 ret = av_buffersink_get_frame(buffersink_ctx, frame);
@@ -141,13 +192,16 @@ static int decode_write(AVCodecContext * const avctx,
                         fprintf(stderr, "Failed to get frame: %s", av_err2str(ret));
                     goto fail;
                 }
-                egl_wayland_out_modeset(dpo, av_buffersink_get_w(buffersink_ctx), av_buffersink_get_h(buffersink_ctx), av_buffersink_get_time_base(buffersink_ctx));
+                vidout_wayland_modeset(dpo, av_buffersink_get_w(buffersink_ctx), av_buffersink_get_h(buffersink_ctx), av_buffersink_get_time_base(buffersink_ctx));
+                time_base = av_buffersink_get_time_base(buffersink_ctx);
             }
             else {
-                egl_wayland_out_modeset(dpo, avctx->coded_width, avctx->coded_height, avctx->framerate);
+                vidout_wayland_modeset(dpo, avctx->coded_width, avctx->coded_height, avctx->framerate);
             }
 
-            egl_wayland_out_display(dpo, frame);
+            if (!no_wait)
+                display_wait(frame, time_base);
+            vidout_wayland_display(dpo, frame);
 
             if (output_file != NULL) {
                 AVFrame *tmp_frame;
@@ -289,23 +343,24 @@ end:
     return ret;
 }
 
-static uint64_t
-us_time()
-{
-    struct timespec ts = {0};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-}
-
 void usage()
 {
     fprintf(stderr,
             "Usage: hello_egl_wayland [-d]\n"
             "                      [-l loop_count] [-f <frames>] [-o yuv_output_file]\n"
             "                      [--deinterlace] [--pace-input <hz>] [--fullscreen]\n"
-            "                      [--no-wait]\n"
+            "                      "
+#if HAS_RUNTICKER
+            "[--ticker <text>] "
+#endif
+#if HAS_RUNCUBE
+            "[--cube] "
+#endif
+            "[--no-wait]\n"
             "                      <input file> [<input_file> ...]\n\n"
-            " -d   Use dmabuf (otherwise egl)\n"
+            " -e        Use EGL to render video (otherwise direct dmabuf)\n"
+            " --cube    Show rotating cube\n"
+            " --ticker  Show scrolling ticker with <text> repeated indefinitely\n"
             " --no-wait Decode at max speed, do not wait for display\n");
     exit(1);
 }
@@ -329,15 +384,21 @@ int main(int argc, char *argv[])
     unsigned int in_n = 0;
     const char * hwdev = "drm";
     int i;
-    egl_wayland_out_env_t * dpo;
+    vid_out_env_t * dpo;
     long loop_count = 1;
     long frame_count = -1;
     const char * out_name = NULL;
     bool wants_deinterlace = false;
     long pace_input_hz = 0;
-    bool use_dmabuf = false;
+    bool try_hw = true;
+    bool use_dmabuf = true;
     bool fullscreen = false;
-    bool no_wait = false;
+#if HAS_RUNCUBE
+    bool wants_cube = false;
+#endif
+#if HAS_RUNTICKER
+    const char * ticker_text = NULL;
+#endif
 
     {
         char * const * a = argv + 1;
@@ -383,8 +444,8 @@ int main(int argc, char *argv[])
                 --n;
                 ++a;
             }
-            else if (strcmp(arg, "-d") == 0) {
-                use_dmabuf = true;
+            else if (strcmp(arg, "-e") == 0) {
+                use_dmabuf = false;
             } else if (strcmp(arg, "--pace-input") == 0) {
                 if (n == 0)
                     usage();
@@ -397,6 +458,20 @@ int main(int argc, char *argv[])
             else if (strcmp(arg, "--deinterlace") == 0) {
                 wants_deinterlace = true;
             }
+#if HAS_RUNCUBE
+            else if (strcmp(arg, "--cube") == 0) {
+                wants_cube = true;
+            }
+#endif
+#if HAS_RUNTICKER
+            else if (strcmp(arg, "--ticker") == 0) {
+                if (n == 0)
+                    usage();
+                ticker_text = *a;
+                --n;
+                ++a;
+            }
+#endif
             else if (strcmp(arg, "--no-wait") == 0) {
                 no_wait = true;
             }
@@ -431,7 +506,7 @@ int main(int argc, char *argv[])
         unsigned int flags =
             (fullscreen ? WOUT_FLAG_FULLSCREEN : 0) |
             (no_wait ? WOUT_FLAG_NO_WAIT : 0);
-        dpo = use_dmabuf ? dmabuf_wayland_out_new(flags) : egl_wayland_out_new(flags);
+        dpo = use_dmabuf ? dmabuf_wayland_out_new(flags) : vidout_wayland_new(flags);
         if (dpo == NULL) {
             fprintf(stderr, "Failed to open egl_wayland output\n");
             return 1;
@@ -445,6 +520,15 @@ int main(int argc, char *argv[])
             return -1;
         }
     }
+
+#if HAS_RUNTICKER
+    if (ticker_text != NULL && *ticker_text != '\0')
+        vidout_wayland_runticker(dpo, ticker_text);
+#endif
+#if HAS_RUNCUBE
+    if (wants_cube)
+        vidout_wayland_runcube(dpo);
+#endif
 
 loopy:
     in_file = in_filelist[in_n];
@@ -462,6 +546,7 @@ loopy:
         return -1;
     }
 
+retry_hw:
     /* find the video stream information */
     ret = av_find_best_stream(input_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
     if (ret < 0) {
@@ -470,29 +555,23 @@ loopy:
     }
     video_stream = ret;
 
-    if (decoder->id == AV_CODEC_ID_H264) {
-        if ((decoder = avcodec_find_decoder_by_name("h264_v4l2m2m")) == NULL) {
+    hw_pix_fmt = AV_PIX_FMT_NONE;
+    if (!try_hw) {
+        /* Nothing */
+    }
+    else if (decoder->id == AV_CODEC_ID_H264) {
+        if ((decoder = avcodec_find_decoder_by_name("h264_v4l2m2m")) == NULL)
             fprintf(stderr, "Cannot find the h264 v4l2m2m decoder\n");
-            return -1;
-        }
-        hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        else
+            hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
     }
-#if 0
-    else if (decoder->id == AV_CODEC_ID_HEVC) {
-        if ((decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m")) == NULL) {
-            fprintf(stderr, "Cannot find the hevc v4l2m2m decoder\n");
-            return -1;
-        }
-        hw_pix_fmt = AV_PIX_FMT_DRM_PRIME;
-    }
-#endif
     else {
         for (i = 0;; i++) {
             const AVCodecHWConfig *config = avcodec_get_hw_config(decoder, i);
             if (!config) {
                 fprintf(stderr, "Decoder %s does not support device type %s.\n",
                         decoder->name, av_hwdevice_get_type_name(type));
-                return -1;
+                break;
             }
             if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
                 config->device_type == type) {
@@ -502,6 +581,11 @@ loopy:
         }
     }
 
+    if (hw_pix_fmt == AV_PIX_FMT_NONE && try_hw) {
+        fprintf(stderr, "No h/w format found - trying s/w\n");
+        try_hw = false;
+    }
+
     if (!(decoder_ctx = avcodec_alloc_context3(decoder)))
         return AVERROR(ENOMEM);
 
@@ -509,18 +593,46 @@ loopy:
     if (avcodec_parameters_to_context(decoder_ctx, video->codecpar) < 0)
         return -1;
 
-    decoder_ctx->get_format  = get_hw_format;
+    if (try_hw) {
+        decoder_ctx->get_format  = get_hw_format;
 
-    if (hw_decoder_init(decoder_ctx, type) < 0)
-        return -1;
+        if (hw_decoder_init(decoder_ctx, type) < 0)
+            return -1;
 
-    decoder_ctx->thread_count = 3;
-    decoder_ctx->flags = AV_CODEC_FLAG_LOW_DELAY;
+        decoder_ctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        decoder_ctx->sw_pix_fmt = AV_PIX_FMT_NONE;
+
+        decoder_ctx->thread_count = 3;
+    }
+    else {
+        decoder_ctx->get_buffer2 = vidout_wayland_get_buffer2;
+        decoder_ctx->opaque = dpo;
+        decoder_ctx->thread_count = 0; // FFmpeg will pick a default
+    }
+    decoder_ctx->flags = 0;
+    // Pick any threading method
+    decoder_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+#if LIBAVCODEC_VERSION_MAJOR < 60
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    decoder_ctx->thread_safe_callbacks = 1;
+#pragma GCC diagnostic pop
+#endif
 
     if ((ret = avcodec_open2(decoder_ctx, decoder, &codec_opts)) < 0) {
+        if (try_hw) {
+            try_hw = false;
+            avcodec_free_context(&decoder_ctx);
+
+            printf("H/w init failed - trying s/w\n");
+            goto retry_hw;
+        }
         fprintf(stderr, "Failed to open codec for stream #%u\n", video_stream);
         return -1;
     }
+
+    printf("Pixfmt after init: %s / %s\n", av_get_pix_fmt_name(decoder_ctx->pix_fmt), av_get_pix_fmt_name(decoder_ctx->sw_pix_fmt));
 
     if (wants_deinterlace) {
         if (init_filters(video, decoder_ctx, "deinterlace_v4l2m2m") < 0) {
@@ -531,9 +643,9 @@ loopy:
 
     /* actual decoding and dump the raw data */
     {
-        uint64_t t0 = us_time() + 3000; // Allow a few ms so we aren't behind at startup
+        int64_t t0 = time_us() + 3000; // Allow a few ms so we aren't behind at startup
         int pts_seen = 0;
-        uint64_t fake_ts = 0;
+        int64_t fake_ts = 0;
 
         frames = frame_count;
         while (ret >= 0) {
@@ -542,7 +654,7 @@ loopy:
 
             if (video_stream == packet.stream_index) {
                 if (pace_input_hz > 0) {
-                    const uint64_t now = us_time();
+                    const int64_t now = time_us();
                     if (now < t0)
                         usleep(t0 - now);
                     else
@@ -560,7 +672,7 @@ loopy:
                     }
                 }
 
-                ret = decode_write(decoder_ctx, dpo, &packet);
+                ret = decode_write(video, decoder_ctx, dpo, &packet);
             }
 
             av_packet_unref(&packet);
@@ -570,7 +682,7 @@ loopy:
     /* flush the decoder */
     packet.data = NULL;
     packet.size = 0;
-    ret = decode_write(decoder_ctx, dpo, &packet);
+    ret = decode_write(video, decoder_ctx, dpo, &packet);
     av_packet_unref(&packet);
 
     if (output_file)
@@ -582,7 +694,6 @@ loopy:
     if (--loop_count > 0)
         goto loopy;
 
-    egl_wayland_out_delete(dpo);
-
+    vidout_wayland_delete(dpo);
     return 0;
 }

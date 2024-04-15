@@ -6,6 +6,8 @@ project(
 		'default_library=static']
 )
 
+conf_data = configuration_data()
+
 wl_client_dep = dependency('wayland-client')
 wl_protocol_dep = dependency('wayland-protocols')
 wl_egl_dep = dependency('wayland-egl')
@@ -18,6 +20,9 @@ wl_scanner = find_program('wayland-scanner')
 wl_sources = [
     'hello_wayland.c',
     'init_window.c',
+	'wayout.c',
+	'dmabuf_pool.c',
+	'dmabuf_alloc.c',
 	'pollqueue.c',
 ]
 
@@ -32,6 +37,7 @@ protocol_defs = [
      'linux-dmabuf-unstable-v1-protocol.c', 'linux-dmabuf-unstable-v1-client-protocol.h'],
     ['/unstable/fullscreen-shell/fullscreen-shell-unstable-v1.xml',
      'fullscreen-shell-unstable-v1-protocol.c', 'fullscreen-shell-unstable-v1-client-protocol.h'],
+	['/staging/single-pixel-buffer/single-pixel-buffer-v1.xml', 'single-pixel-buffer-v1-client-protocol.c', 'single-pixel-buffer-v1-client-protocol.h'],
     ['/stable/xdg-shell/xdg-shell.xml', 'xdg-shell-protocol.c', 'xdg-shell-client-protocol.h'],
     ['/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml', 'xdg-decoration-unstable-v1-protocol.c', 'xdg-decoration-unstable-v1-client-protocol.h'],
 ]
@@ -43,7 +49,7 @@ foreach protodef: protocol_defs
     protocols_files += [custom_target(protodef.get(1),
       output : protodef.get(1),
       input : xmlfile,
-      command : [wl_scanner, 'code', '@INPUT@', '@OUTPUT@'])]
+      command : [wl_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])]
 
     protocols_files += [custom_target(protodef.get(2),
       output : protodef.get(2),
@@ -56,9 +62,13 @@ extra_c_args = [
 
 dep_rt = meson.get_compiler('c').find_library('rt')
 
+subdir('freetype')
+subdir('cube')
+
 executable('hello_wayland',
   wl_sources + protocols_files,
   install : true,
+  link_with : runticker_opt + runcube_opt,
   dependencies : [wl_client_dep, wl_protocol_dep, wl_egl_dep, epoxy_dep, libdrm_dep,
     threads_dep,
     dep_rt,
@@ -68,3 +78,9 @@ executable('hello_wayland',
     dependency('libavutil'),
   ]
 )
+
+configure_file(
+	output : 'config.h',
+	configuration : conf_data
+)
+

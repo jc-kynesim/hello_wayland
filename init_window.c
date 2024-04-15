@@ -1,14 +1,17 @@
+#include "config.h"
+#include "init_window.h"
+
 #include <assert.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#include <wayland-client-protocol.h>
 #include <wayland-egl.h> // Wayland EGL MUST be included before EGL headers
 
 #include <epoxy/gl.h>
@@ -20,53 +23,23 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
-
-// protocol headers that we build as part of the compile
-#include "viewporter-client-protocol.h"
-#include "linux-dmabuf-unstable-v1-client-protocol.h"
-#include "xdg-shell-client-protocol.h"
-#include "xdg-decoration-unstable-v1-client-protocol.h"
+#include <libavutil/imgutils.h>
 
 // Local headers
-#include "init_window.h"
+#include "dmabuf_alloc.h"
+#include "dmabuf_pool.h"
 #include "pollqueue.h"
+#include "wayout.h"
+
+#include "freetype/runticker.h"
+#include "cube/runcube.h"
 
 //#include "log.h"
 #define LOG printf
 
 #define TRACE_ALL 0
 
-typedef struct fmt_ent_s {
-    uint32_t fmt;
-    uint64_t mod;
-} fmt_ent_t;
-
-typedef struct fmt_list_s {
-    fmt_ent_t *fmts;
-    unsigned int size;
-    unsigned int len;
-} fmt_list_t;
-
 typedef struct window_ctx_s {
-    struct wl_display *w_display;
-    int window_width;
-    int window_height;
-    int req_w;
-    int req_h;
-    struct pollqueue *pq;
-
-    // Bound wayland extensions
-    struct wl_compositor *compositor;
-    struct zwp_linux_dmabuf_v1 *linux_dmabuf_v1;
-    struct zxdg_decoration_manager_v1 *decoration_manager;
-    struct wp_viewporter *viewporter;
-    struct xdg_wm_base *wm_base;
-
-    // Wayland objects
-    struct wl_surface *surface;
-    struct wp_viewport *viewport;
-    struct xdg_surface *wm_surface;
-    struct xdg_toplevel *wm_toplevel;
 
     struct wl_callback *frame_callback;
 
@@ -79,35 +52,48 @@ typedef struct window_ctx_s {
     uint32_t last_fmt;
     uint64_t last_mod;
 
-    // Dmabuf
-    fmt_list_t fmt_list;
 } window_ctx_t;
 
-typedef struct wayland_out_env_s {
+typedef struct vid_out_env_s {
+    atomic_int ref_count;
+
     window_ctx_t wc;
 
-    int show_all;
+    wo_env_t * woe;
+    wo_window_t * win;
+    wo_rect_t win_rect;
+    wo_surface_t * vid;
+    unsigned int vid_par_num;
+    unsigned int vid_par_den;
+
     int fullscreen;
 
-    pthread_mutex_t q_lock;
-    sem_t egl_setup_sem;
-    bool egl_setup_fail;
     bool is_egl;
 
-    sem_t q_sem;
-    AVFrame *q_next;
+    struct pollqueue * vid_pq;
+    struct dmabufs_ctl * dbsc;
+    dmabuf_pool_t * dpool;
 
-    bool frame_wait;
-} wayland_out_env_t;
+#if HAS_RUNCUBE
+    runcube_env_t * rce;
+#endif
+#if HAS_RUNTICKER
+    runticker_env_t * rte;
+#endif
+} vid_out_env_t;
 
 // Structure that holds context whilst waiting for fence release
 struct dmabuf_w_env_s {
     int fd;
     AVBufferRef *buf;
-    struct pollqueue *pq;
     struct polltask *pt;
     window_ctx_t *wc;
 };
+
+typedef struct sw_dmabuf_s {
+    AVDRMFrameDescriptor desc;
+    struct dmabuf_h * dh;
+} sw_dmabuf_t;
 
 
 #define WINDOW_WIDTH 1280
@@ -121,81 +107,64 @@ canon_mod(const uint64_t m)
     return fourcc_mod_is_vendor(m, BROADCOM) ? fourcc_mod_broadcom_mod(m) : m;
 }
 
-// ---------------------------------------------------------------------------
-//
-// Format list creation & lookup
-// Currently only used for dmabuf
+static const struct {
+    enum AVPixelFormat pixfmt;
+    uint32_t drm_format;
+    uint64_t mod; // 0 = LINEAR
+} fmt_table[] = {
+    // Monochrome.
+#ifdef DRM_FORMAT_R8
+    { AV_PIX_FMT_GRAY8,    DRM_FORMAT_R8,      DRM_FORMAT_MOD_LINEAR},
+#endif
+#ifdef DRM_FORMAT_R16
+    { AV_PIX_FMT_GRAY16LE, DRM_FORMAT_R16,     DRM_FORMAT_MOD_LINEAR},
+    { AV_PIX_FMT_GRAY16BE, DRM_FORMAT_R16      | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+#endif
+    // <8-bit RGB.
+    { AV_PIX_FMT_BGR8,     DRM_FORMAT_BGR233,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB555LE, DRM_FORMAT_XRGB1555, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB555BE, DRM_FORMAT_XRGB1555 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR555LE, DRM_FORMAT_XBGR1555, DRM_FORMAT_MOD_LINEAR},
+    { AV_PIX_FMT_BGR555BE, DRM_FORMAT_XBGR1555 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB565LE, DRM_FORMAT_RGB565,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB565BE, DRM_FORMAT_RGB565   | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR565LE, DRM_FORMAT_BGR565,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR565BE, DRM_FORMAT_BGR565   | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    // 8-bit RGB.
+    { AV_PIX_FMT_RGB24,    DRM_FORMAT_RGB888,   DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR24,    DRM_FORMAT_BGR888,   DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_0RGB,     DRM_FORMAT_BGRX8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_0BGR,     DRM_FORMAT_RGBX8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGB0,     DRM_FORMAT_XBGR8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGR0,     DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_ARGB,     DRM_FORMAT_BGRA8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_ABGR,     DRM_FORMAT_RGBA8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_RGBA,     DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_BGRA,     DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR },
+    // 10-bit RGB.
+    { AV_PIX_FMT_X2RGB10LE, DRM_FORMAT_XRGB2101010, DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_X2RGB10BE, DRM_FORMAT_XRGB2101010 | DRM_FORMAT_BIG_ENDIAN, DRM_FORMAT_MOD_LINEAR },
+    // 8-bit YUV 4:2:0.
+    { AV_PIX_FMT_YUV420P,  DRM_FORMAT_YUV420,  DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_NV12,     DRM_FORMAT_NV12,    DRM_FORMAT_MOD_LINEAR },
+    // 8-bit YUV 4:2:2.
+    { AV_PIX_FMT_YUYV422,  DRM_FORMAT_YUYV,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_YVYU422,  DRM_FORMAT_YVYU,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_UYVY422,  DRM_FORMAT_UYVY,    DRM_FORMAT_MOD_LINEAR },
+    { AV_PIX_FMT_NONE,     0,                  DRM_FORMAT_MOD_INVALID }
+};
 
-static int
-fmt_list_add(fmt_list_t *const fl, uint32_t fmt, uint64_t mod)
+uint32_t
+fmt_to_drm(enum AVPixelFormat pixfmt, uint64_t * pMod)
 {
-    if (fl->len >= fl->size) {
-        unsigned int n = fl->len == 0 ? 64 : fl->len * 2;
-        fmt_ent_t *t = realloc(fl->fmts, n * sizeof(*t));
-        if (t == NULL)
-            return -1;
-        fl->fmts = t;
-        fl->size = n;
+    unsigned int i;
+    for (i = 0; fmt_table[i].pixfmt != AV_PIX_FMT_NONE; ++i) {
+        if (fmt_table[i].pixfmt == pixfmt)
+            break;
     }
-    fl->fmts[fl->len++] = (fmt_ent_t) {
-        .fmt = fmt,
-        .mod = mod
-    };
-    return 0;
-}
-
-static int
-fmt_sort_cb(const void *va, const void *vb)
-{
-    const fmt_ent_t *const a = va;
-    const fmt_ent_t *const b = vb;
-    return a->fmt < b->fmt ? -1 : a->fmt != b->fmt ? 1 :
-           a->mod < b->mod ? -1 : a->mod != b->mod ? 1 : 0;
-}
-
-static void
-fmt_list_sort(fmt_list_t *const fl)
-{
-    if (fl->len <= 1)
-        return;
-    qsort(fl->fmts, fl->len, sizeof(*fl->fmts), fmt_sort_cb);
-}
-
-static bool
-fmt_list_find(const fmt_list_t *const fl, const uint32_t fmt, const uint64_t mod)
-{
-    if (fl->len == 0) {
-        return false;
-    }
-    else {
-        const fmt_ent_t x = {
-            .fmt = fmt,
-            .mod = mod
-        };
-        const fmt_ent_t *const fe =
-            bsearch(&x, fl->fmts, fl->len, sizeof(x), fmt_sort_cb);
-        return fe != NULL;
-    }
-}
-
-static void
-fmt_list_uninit(fmt_list_t *const fl)
-{
-    free(fl->fmts);
-    fl->fmts = NULL;
-    fl->size = 0;
-    fl->len = 0;
-}
-
-static int
-fmt_list_init(fmt_list_t *const fl, const size_t initial_size)
-{
-    fl->size = 0;
-    fl->len = 0;
-    if ((fl->fmts = malloc(initial_size * sizeof(*fl->fmts))) == NULL)
-        return -1;
-    fl->size = initial_size;
-    return 0;
+    if (pMod != NULL)
+        *pMod = fmt_table[i].mod;
+    return fmt_table[i].drm_format;
 }
 
 
@@ -212,7 +181,6 @@ dmabuf_w_env_new(window_ctx_t *const wc, AVBufferRef *const buf, const int fd)
 
     dbe->fd = fd;
     dbe->buf = av_buffer_ref(buf);
-    dbe->pq = pollqueue_ref(wc->pq);
     dbe->pt = NULL;
     dbe->wc = wc;
     return dbe;
@@ -223,7 +191,6 @@ dmabuf_w_env_free(struct dmabuf_w_env_s *const dbe)
 {
     av_buffer_unref(&dbe->buf);
     polltask_delete(&dbe->pt);
-    pollqueue_unref(&dbe->pq);
     free(dbe);
 }
 
@@ -238,89 +205,119 @@ dmabuf_fence_release_cb(void *v, short revents)
 //
 // Wayland dmabuf display function
 
-static void
-w_buffer_release(void *data, struct wl_buffer *wl_buffer)
+static wo_rect_t
+box_rect(const unsigned int par_num, const unsigned int par_den, const wo_rect_t win_rect)
 {
-    struct dmabuf_w_env_s *const dbe = data;
+    wo_rect_t r = win_rect;
 
-    // Sent by the compositor when it's no longer using this buffer
-    wl_buffer_destroy(wl_buffer);
-    // Whilst the wl_buffer isn't in use the underlying dmabuf may (and often
-    // is) still be in use with fences set on it. We have to wait for those
-    // as V4L2 doesn't respect them.
-    // * Arguably if we have >1 object we should wait for all but just waiting
-    //   for the 1st works fine.
-    dbe->pt = polltask_new(dbe->pq, dbe->fd, POLLOUT, dmabuf_fence_release_cb, dbe);
-    pollqueue_add_task(dbe->pt, -1);
+    if (par_num == 0 || par_den == 0)
+        return r;
+
+    if (par_num * win_rect.h < par_den * win_rect.w) {
+        // Pillarbox
+        r.w = win_rect.h * par_num / par_den;
+        r.x = (win_rect.w - r.w) / 2;
+    }
+    else {
+        // Letterbox
+        r.h = win_rect.w * par_den / par_num;
+        r.y = (win_rect.h - r.h) / 2;
+    }
+    return r;
 }
 
 static void
-do_display_dmabuf(window_ctx_t *const wc, AVFrame *const frame)
+set_vid_par(vid_out_env_t * const ve, const AVFrame * const frame)
 {
-    struct zwp_linux_buffer_params_v1 *params;
-    const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)frame->data[0];
+    const unsigned int w = av_frame_cropped_width(frame);
+    const unsigned int h = av_frame_cropped_height(frame);
+    unsigned int par_num = frame->sample_aspect_ratio.num * w;
+    unsigned int par_den = frame->sample_aspect_ratio.den * h;
+
+    if (par_den == 0 || par_num == 0) {
+        if (((w == 720 || w == 704) && (h == 480 || h == 576)) ||
+            ((w == 360 || w == 352) && (h == 240 || h == 288)))
+        {
+            par_num = 4;
+            par_den = 3;
+        }
+        else
+        {
+            par_num = w;
+            par_den = h;
+        }
+    }
+    ve->vid_par_den = par_den;
+    ve->vid_par_num = par_num;
+}
+
+static void
+w_buffer_release(void *data, wo_fb_t *wofb)
+{
+    AVBufferRef *buf = data;
+
+    // Sent by the compositor when it's no longer using this buffer
+    wo_fb_unref(&wofb);
+    av_buffer_unref(&buf);
+}
+
+static void
+do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
+{
+    const AVDRMFrameDescriptor *desc = frame->format == AV_PIX_FMT_DRM_PRIME ?
+        (AVDRMFrameDescriptor * ) frame->data[0] :
+        &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     const uint32_t format = desc->layers[0].format;
-    const uint64_t cmod = canon_mod(desc->objects[0].format_modifier);
     const unsigned int width = av_frame_cropped_width(frame);
     const unsigned int height = av_frame_cropped_height(frame);
-    struct wl_buffer *w_buffer;
+    wo_fb_t * wofb = NULL;
     unsigned int n = 0;
-    unsigned int flags = 0;
+    const uint64_t mod = desc->objects[0].format_modifier;
     int i;
-
-    static const struct wl_buffer_listener w_buffer_listener = {
-        .release = w_buffer_release,
-    };
 
 #if TRACE_ALL
     LOG("<<< %s\n", __func__);
 #endif
 
-    if (!fmt_list_find(&wc->fmt_list, format, cmod)) {
-        LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(format), cmod);
+    if (!wo_surface_dmabuf_fmt_check(ve->vid, format, mod)) {
+        LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(format), mod);
         return;
     }
 
-    /* Creation and configuration of planes  */
-    params = zwp_linux_dmabuf_v1_create_params(wc->linux_dmabuf_v1);
-    if (!params) {
-        LOG("zwp_linux_dmabuf_v1_create_params FAILED\n");
-        return;
-    }
+    {
+        struct dmabuf_h * dhs[4];
+        size_t offsets[4];
+        size_t strides[4];
+        unsigned int obj_nos[4];
 
-    for (i = 0; i < desc->nb_layers; ++i) {
-        int j;
-        for (j = 0; j < desc->layers[i].nb_planes; ++j) {
-            const AVDRMPlaneDescriptor *const p = desc->layers[i].planes + j;
-            const AVDRMObjectDescriptor *const obj = desc->objects + p->object_index;
-
-            zwp_linux_buffer_params_v1_add(params, obj->fd, n++, p->offset, p->pitch,
-                                           (unsigned int)(obj->format_modifier >> 32),
-                                           (unsigned int)(obj->format_modifier & 0xFFFFFFFF));
+        for (i = 0; i != desc->nb_objects; ++i) {
+            dhs[i] = dmabuf_import(desc->objects[i].fd, desc->objects[i].size);
         }
+        for (i = 0, n = 0; i < desc->nb_layers; ++i) {
+            int j;
+            for (j = 0; j < desc->layers[i].nb_planes; ++j, ++n) {
+                const AVDRMPlaneDescriptor *const p = desc->layers[i].planes + j;
+                offsets[n] = p->offset;
+                strides[n] = p->pitch;
+                obj_nos[n] = p->object_index;
+            }
+        }
+
+        wofb = wo_fb_new_dh(ve->woe, width, height,
+                            format, mod,
+                            desc->nb_objects, dhs,
+                            n, offsets, strides, obj_nos);
     }
 
-    if (frame->interlaced_frame) {
-        flags |= ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_INTERLACED;
-        if (!frame->top_field_first)
-            flags |= ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_BOTTOM_FIRST;
-    }
-
-    w_buffer = zwp_linux_buffer_params_v1_create_immed(params, width, height, format, flags);
-    zwp_linux_buffer_params_v1_destroy(params);
-
-    if (w_buffer == NULL) {
+    if (wofb == NULL) {
         LOG("Failed to create dmabuf\n");
         return;
     }
 
-    wl_buffer_add_listener(w_buffer, &w_buffer_listener,
-                           dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd));
+    // **** Maybe better to attach buf delete to wofb delete?
+    wo_fb_on_release_set(wofb, true, w_buffer_release, av_buffer_ref(frame->buf[0]));
 
-    wl_surface_attach(wc->surface, w_buffer, 0, 0);
-    wp_viewport_set_destination(wc->viewport, wc->req_w, wc->req_h);
-    wl_surface_damage(wc->surface, 0, 0, INT32_MAX, INT32_MAX);
-    wl_surface_commit(wc->surface);
+    wo_surface_attach_fb(ve->vid, wofb, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
 }
 
 // ---------------------------------------------------------------------------
@@ -359,9 +356,12 @@ check_support_egl(window_ctx_t *const wc, const uint32_t fmt, const uint64_t mod
 }
 
 static void
-do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
+do_display_egl(vid_out_env_t * const ve, AVFrame *const frame)
 {
-    const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)frame->data[0];
+    window_ctx_t *const wc = &ve->wc;
+    const AVDRMFrameDescriptor *desc = frame->format == AV_PIX_FMT_DRM_PRIME ?
+        (AVDRMFrameDescriptor * ) frame->data[0] :
+        &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     EGLint attribs[50];
     EGLint *a = attribs;
     int i, j;
@@ -395,14 +395,16 @@ do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
         LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(desc->layers[0].format), desc->objects[0].format_modifier);
         return;
     }
-
+#if 0
     if (wc->req_w != wc->window_width || wc->req_h != wc->window_height) {
         LOG("%s: Resize %dx%d -> %dx%d\n", __func__, wc->window_width, wc->window_height, wc->req_w, wc->req_h);
         wl_egl_window_resize(wc->w_egl_window, wc->req_w, wc->req_h, 0, 0);
         wc->window_width = wc->req_w;
         wc->window_height = wc->req_h;
+        wp_viewport_set_destination(wc->vid.viewport, wc->req_w, wc->req_h);
+        wl_surface_commit(wc->vid.surface);
     }
-
+#endif
     *a++ = EGL_WIDTH;
     *a++ = av_frame_cropped_width(frame);
     *a++ = EGL_HEIGHT;
@@ -457,9 +459,12 @@ do_display_egl(window_ctx_t *const wc, AVFrame *const frame)
     // (same as the direct wayland output after buffer release)
     {
         struct dmabuf_w_env_s *const dbe = dmabuf_w_env_new(wc, frame->buf[0], desc->objects[0].fd);
-        dbe->pt = polltask_new(dbe->pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
+        dbe->pt = polltask_new(ve->vid_pq, desc->objects[0].fd, POLLOUT, dmabuf_fence_release_cb, dbe);
         pollqueue_add_task(dbe->pt, -1);
     }
+
+    // *** EGL plane resize missing - this is a cheat
+    wo_surface_dst_pos_set(ve->vid, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
 }
 
 // ---------------------------------------------------------------------------
@@ -587,8 +592,9 @@ gl_setup()
 }
 
 static EGLBoolean
-CreateEGLContext(window_ctx_t *const wc)
+CreateEGLContext(vid_out_env_t * const ve)
 {
+    window_ctx_t *const wc = &ve->wc;
     EGLint numConfigs;
     EGLint majorVersion;
     EGLint minorVersion;
@@ -605,7 +611,7 @@ CreateEGLContext(window_ctx_t *const wc)
         EGL_NONE
     };
     EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE, EGL_NONE };
-    EGLDisplay display = eglGetDisplay(wc->w_display);
+    EGLDisplay display = eglGetDisplay(wo_env_display(ve->woe));
     if (display == EGL_NO_DISPLAY) {
         LOG("No EGL Display...\n");
         return EGL_FALSE;
@@ -634,8 +640,7 @@ CreateEGLContext(window_ctx_t *const wc)
         return EGL_FALSE;
     }
 
-    wc->w_egl_window =
-        wl_egl_window_create(wc->surface, wc->window_width, wc->window_height);
+    wc->w_egl_window = wo_surface_egl_window_create(ve->vid, (wo_rect_t){0,0,WINDOW_WIDTH,WINDOW_HEIGHT});
 
     if (wc->w_egl_window == EGL_NO_SURFACE) {
         LOG("No window !?\n");
@@ -662,14 +667,12 @@ CreateEGLContext(window_ctx_t *const wc)
     return EGL_TRUE;
 }
 
-static void
-do_egl_setup(void *v, short revents)
+static int
+do_egl_setup(vid_out_env_t *const vc)
 {
-    wayland_out_env_t *const woe = v;
-    window_ctx_t *const wc = &woe->wc;
-    (void)revents;
+    window_ctx_t *const wc = &vc->wc;
 
-    if (!CreateEGLContext(wc))
+    if (!CreateEGLContext(vc))
         goto fail;
 
     // Make the context current
@@ -693,379 +696,133 @@ do_egl_setup(void *v, short revents)
         LOG("%s: gl_setup failed\n", __func__);
         goto fail;
     }
-    sem_post(&woe->egl_setup_sem);
-    return;
-
-fail:
-    woe->egl_setup_fail = true;
-    sem_post(&woe->egl_setup_sem);
-}
-
-// ---------------------------------------------------------------------------
-//
-// Display a new frame when (a) we have one and (b) we have had a frame
-// callback from wayland
-
-static void try_display(wayland_out_env_t *const de);
-
-static void
-surface_frame_done_cb(void *data, struct wl_callback *cb, uint32_t time)
-{
-    wayland_out_env_t *const woe = data;
-    (void)time;
-
-    woe->wc.frame_callback = NULL;
-    wl_callback_destroy(cb);
-
-    woe->frame_wait = false;
-    try_display(woe);
-}
-
-static void
-do_prod_display(void *v, short revents)
-{
-    (void)revents;
-    try_display(v);
-}
-
-static void
-try_display(wayland_out_env_t *const woe)
-{
-    window_ctx_t *const wc = &woe->wc;
-    AVFrame *frame;
-
-    if (woe->frame_wait)
-        return;
-
-    pthread_mutex_lock(&woe->q_lock);
-    frame = woe->q_next;
-    woe->q_next = NULL;
-    pthread_mutex_unlock(&woe->q_lock);
-
-    if (frame) {
-        static const struct wl_callback_listener frame_listener = { .done = surface_frame_done_cb };
-        wc->frame_callback = wl_surface_frame(wc->surface);
-        wl_callback_add_listener(wc->frame_callback, &frame_listener, woe);
-        woe->frame_wait = true;
-        if (woe->show_all)
-            sem_post(&woe->q_sem);
-
-        if (woe->is_egl)
-            do_display_egl(wc, frame);
-        else
-            do_display_dmabuf(wc, frame);
-        av_frame_free(&frame);
-    }
-}
-
-// ---------------------------------------------------------------------------
-//
-// XDG Toplevel callbacks
-// Mostly ignored - except resize
-
-static void
-xdg_toplevel_configure_cb(void *data,
-                                      struct xdg_toplevel *xdg_toplevel, int32_t w, int32_t h,
-                                      struct wl_array *states)
-{
-    window_ctx_t *const wc = data;
-    (void)xdg_toplevel;
-    (void)states;
-
-    LOG("%s: %dx%d\n", __func__, w, h);
-
-    // no window geometry event, ignore
-    if (w == 0 && h == 0)
-        return;
-
-    wc->req_h = h;
-    wc->req_w = w;
-}
-
-static void
-xdg_toplevel_close_cb(void *data, struct xdg_toplevel *xdg_toplevel)
-{
-    (void)data;
-    (void)xdg_toplevel;
-}
-
-static void
-xdg_toplevel_configure_bounds_cb(void *data,
-                                 struct xdg_toplevel *xdg_toplevel,
-                                 int32_t width, int32_t height)
-{
-    (void)data;
-    (void)xdg_toplevel;
-    LOG("%s: %dx%d\n", __func__, width, height);
-}
-
-static void
-xdg_toplevel_wm_capabilities_cb(void *data,
-                                            struct xdg_toplevel *xdg_toplevel,
-                                            struct wl_array *capabilities)
-{
-    (void)data;
-    (void)xdg_toplevel;
-    (void)capabilities;
-}
-
-static const struct xdg_toplevel_listener xdg_toplevel_listener = {
-    .configure = xdg_toplevel_configure_cb,
-    .close = xdg_toplevel_close_cb,
-    .configure_bounds = xdg_toplevel_configure_bounds_cb,
-    .wm_capabilities = xdg_toplevel_wm_capabilities_cb,
-};
-
-// ---------------------------------------------------------------------------
-//
-// xdg_surface_configure callback
-// indictates that a sequence of configuration callbacks has finished
-// we could (should?) resize out buffers here but it is easier to leave it to
-// the next display. The ack goes with the next commit so that is all OK
-
-static void
-xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial)
-{
-    (void)data;
-
-    xdg_surface_ack_configure(xdg_surface, serial);
-}
-
-static const struct xdg_surface_listener xdg_surface_listener = {
-    .configure = xdg_surface_configure,
-};
-
-// ---------------------------------------------------------------------------
-
-static void
-xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial)
-{
-    (void)data;
-    xdg_wm_base_pong(xdg_wm_base, serial);
-}
-
-static const struct xdg_wm_base_listener xdg_wm_base_listener = {
-    .ping = xdg_wm_base_ping,
-};
-
-// ---------------------------------------------------------------------------
-
-static void
-linux_dmabuf_v1_listener_format(void *data,
-                                            struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1,
-                                            uint32_t format)
-{
-    // Superceeded by _modifier
-    window_ctx_t *const wc = data;
-    (void)zwp_linux_dmabuf_v1;
-
-    fmt_list_add(&wc->fmt_list, format, DRM_FORMAT_MOD_LINEAR);
-}
-
-static void
-linux_dmabuf_v1_listener_modifier(void *data,
-                                  struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1,
-                                  uint32_t format,
-                                  uint32_t modifier_hi,
-                                  uint32_t modifier_lo)
-{
-    window_ctx_t *const wc = data;
-    (void)zwp_linux_dmabuf_v1;
-
-    fmt_list_add(&wc->fmt_list, format, ((uint64_t)modifier_hi << 32) | modifier_lo);
-}
-
-static const struct zwp_linux_dmabuf_v1_listener linux_dmabuf_v1_listener = {
-    .format = linux_dmabuf_v1_listener_format,
-    .modifier = linux_dmabuf_v1_listener_modifier,
-};
-
-// ---------------------------------------------------------------------------
-
-static void
-decoration_configure_cb(void *data,
-                        struct zxdg_toplevel_decoration_v1 *zxdg_toplevel_decoration_v1,
-                        uint32_t mode)
-{
-    (void)data;
-    LOG("%s: mode %d\n", __func__, mode);
-    zxdg_toplevel_decoration_v1_destroy(zxdg_toplevel_decoration_v1);
-}
-
-static struct zxdg_toplevel_decoration_v1_listener decoration_listener = {
-    .configure = decoration_configure_cb,
-};
-
-// ---------------------------------------------------------------------------
-
-static void
-global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
-                                    const char *interface, uint32_t version)
-{
-    wayland_out_env_t *const woe = data;
-    window_ctx_t *const wc = &woe->wc;
-    (void)version;
-
-#if TRACE_ALL
-    LOG("Got a registry event for %s vers %d id %d\n", interface, version, id);
-#endif
-
-    if (strcmp(interface, wl_compositor_interface.name) == 0)
-        wc->compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 4);
-
-    // Want version 3 as that has _create_immed (ver 2) and modifiers (ver 3)
-    // v4 reworks format listing again to be more complex - avoid for now
-    if (!woe->is_egl &&
-        strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
-        wc->linux_dmabuf_v1 = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 3);
-        zwp_linux_dmabuf_v1_add_listener(wc->linux_dmabuf_v1, &linux_dmabuf_v1_listener, wc);
-    }
-
-    if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        wc->wm_base = wl_registry_bind(registry, id, &xdg_wm_base_interface, 1);
-        xdg_wm_base_add_listener(wc->wm_base, &xdg_wm_base_listener, NULL);
-    }
-    if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0)
-        wc->decoration_manager = wl_registry_bind(registry, id, &zxdg_decoration_manager_v1_interface, 1);
-    if (strcmp(interface, wp_viewporter_interface.name) == 0)
-        wc->viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
-}
-
-static void
-global_registry_remover(void *data, struct wl_registry *registry, uint32_t id)
-{
-    (void)data;
-    (void)registry;
-
-    LOG("Got a registry losing event for %d\n", id);
-}
-
-static int
-get_display_and_registry(wayland_out_env_t *const woe, window_ctx_t *const wc)
-{
-
-    struct wl_display *const display = wl_display_connect(NULL);
-    struct wl_registry *registry = NULL;
-
-    static const struct wl_registry_listener global_registry_listener = {
-        global_registry_handler,
-        global_registry_remover
-    };
-
-    if (display == NULL) {
-        LOG("Can't connect to wayland display !?\n");
-        return -1;
-    }
-
-    if ((registry = wl_display_get_registry(display)) == NULL) {
-        LOG("Failed to get registry\n");
-        goto fail;
-    }
-
-    wl_registry_add_listener(registry, &global_registry_listener, woe);
-
-    // This calls the attached listener global_registry_handler
-    wl_display_roundtrip(display);
-    // Roundtrip again to ensure that things that are returned immediately
-    // after bind are now done
-    wl_display_roundtrip(display);
-    // Don't need this anymore
-    // In theory supported extensions are dynamic - ignore that
-    wl_registry_destroy(registry);
-
-    wc->w_display = display;
-    fmt_list_sort(&wc->fmt_list);
     return 0;
 
 fail:
-    if (registry)
-        wl_registry_destroy(registry);
-    if (display)
-        wl_display_disconnect(display);
     return -1;
-}
-
-static void
-destroy_window(window_ctx_t *const wc)
-{
-    if (!wc->w_display)
-        return;
-
-    if (wc->viewport)
-        wp_viewport_destroy(wc->viewport);
-
-    if (wc->egl_surface)
-        eglDestroySurface(wc->egl_display, wc->egl_surface);
-    if (wc->egl_context)
-        eglDestroyContext(wc->egl_display, wc->egl_context);
-    if (wc->w_egl_window)
-        wl_egl_window_destroy(wc->w_egl_window);
-
-    if (wc->wm_toplevel)
-        xdg_toplevel_destroy(wc->wm_toplevel);
-    if (wc->wm_surface)
-        xdg_surface_destroy(wc->wm_surface);
-    if (wc->surface)
-        wl_surface_destroy(wc->surface);
-
-    // The frame callback would destroy this but there is no guarantee it
-    // would ever be called so there is no point waiting
-    if (wc->frame_callback)
-        wl_callback_destroy(wc->frame_callback);
-
-    if (wc->wm_base)
-        xdg_wm_base_destroy(wc->wm_base);
-    if (wc->decoration_manager)
-        zxdg_decoration_manager_v1_destroy(wc->decoration_manager);
-    if (wc->viewporter)
-        wp_viewporter_destroy(wc->viewporter);
-    if (wc->linux_dmabuf_v1)
-        zwp_linux_dmabuf_v1_destroy(wc->linux_dmabuf_v1);
-    if (wc->compositor)
-        wl_compositor_destroy(wc->compositor);
-
-    wl_display_roundtrip(wc->w_display);
 }
 
 // ---------------------------------------------------------------------------
 //
-// Wayland dispatcher
-//
-// Contains a flush in the pre-poll function so there is no need for one in
-// any callback
+// get_buffer2 for s/w decoders
 
-// Pre display thread poll function
-static void
-pollq_pre_cb(void *v, struct pollfd *pfd)
+static void sw_dmabuf_free(void *opaque, uint8_t *data)
 {
-    window_ctx_t *const wc = v;
-    struct wl_display *const display = wc->w_display;
-
-    while (wl_display_prepare_read(display) != 0)
-        wl_display_dispatch_pending(display);
-
-    if (wl_display_flush(display) >= 0)
-        pfd->events = POLLIN;
-    else
-        pfd->events = POLLOUT | POLLIN;
-    pfd->fd = wl_display_get_fd(display);
+    sw_dmabuf_t * const swd = opaque;
+    (void)data;
+    dmabuf_unref(&swd->dh);
+    free(swd);
 }
 
-// Post display thread poll function
-// Happens before any other pollqueue callbacks
-// Dispatches wayland callbacks
-static void
-pollq_post_cb(void *v, short revents)
+static AVBufferRef *
+sw_dmabuf_make(struct AVCodecContext * const avctx, vid_out_env_t * const vc, const AVFrame * const frame)
 {
-    window_ctx_t *const wc = v;
-    struct wl_display *const display = wc->w_display;
+    sw_dmabuf_t * const swd = calloc(1, sizeof(*swd));
+    AVBufferRef * buf;
+    int linesize[4];
+    int w = frame->width;
+    int h = frame->height;
+    int unaligned;
+    ptrdiff_t linesize1[4];
+    size_t size[4];
+    int stride_align[AV_NUM_DATA_POINTERS];
+    size_t total_size;
+    unsigned int i;
+    unsigned int planes;
+    uint64_t drm_mod;
+    const uint32_t drm_fmt = fmt_to_drm(frame->format, &drm_mod);
+    int ret;
 
-    if ((revents & POLLIN) == 0)
-        wl_display_cancel_read(display);
-    else
-        wl_display_read_events(display);
+    if (swd == NULL)
+        return NULL;
 
-    wl_display_dispatch_pending(display);
+    if (drm_fmt == 0 ||
+        (buf = av_buffer_create((uint8_t*)swd, sizeof(*swd), sw_dmabuf_free, swd, 0)) == NULL) {
+        free(swd);
+        return NULL;
+    }
+
+    // Size & align code taken from libavcodec/getbuffer.c:update_frame_pool
+    avcodec_align_dimensions2(avctx, &w, &h, stride_align);
+
+    do {
+        // NOTE: do not align linesizes individually, this breaks e.g. assumptions
+        // that linesize[0] == 2*linesize[1] in the MPEG-encoder for 4:2:2
+        ret = av_image_fill_linesizes(linesize, avctx->pix_fmt, w);
+        if (ret < 0)
+            goto fail;
+        // increase alignment of w for next try (rhs gives the lowest bit set in w)
+        w += w & ~(w - 1);
+
+        unaligned = 0;
+        for (i = 0; i < 4; i++)
+            unaligned |= linesize[i] % stride_align[i];
+    } while (unaligned);
+
+    for (i = 0; i < 4; i++)
+        linesize1[i] = linesize[i];
+    ret = av_image_fill_plane_sizes(size, avctx->pix_fmt, h, linesize1);
+    if (ret < 0)
+        goto fail;
+
+    total_size = 0;
+    for (planes = 0; planes != 4 && size[planes] != 0; ++planes)
+        total_size += size[planes];
+
+    if ((swd->dh = dmabuf_pool_fb_new(vc->dpool, total_size)) == NULL) {
+        fprintf(stderr, "dmabuf_alloc failed\n");
+        goto fail;
+    }
+
+    swd->desc.nb_objects = 1;
+    swd->desc.objects[0].fd = dmabuf_fd(swd->dh);
+    swd->desc.objects[0].size = dmabuf_size(swd->dh);
+    swd->desc.objects[0].format_modifier = drm_mod;
+    swd->desc.nb_layers = 1;
+    swd->desc.layers[0].format = drm_fmt;
+    swd->desc.layers[0].nb_planes = planes;
+    total_size = 0;
+    for (i = 0; i != planes; ++i) {
+        AVDRMPlaneDescriptor *const p = swd->desc.layers[0].planes + i;
+        p->object_index = 0;
+        p->offset = total_size;
+        p->pitch = linesize1[i];
+        total_size += size[i];
+    }
+
+    return buf;
+
+fail:
+    // swd is freed by freeing buf
+    av_buffer_unref(&buf);
+    fprintf(stderr, "WTF\n");
+    return NULL;
+}
+
+static void
+sw_dmabuf_frame_fill(AVFrame * const frame, const AVBufferRef * const buf)
+{
+    const sw_dmabuf_t *const swd = (sw_dmabuf_t *)buf->data;
+    uint8_t * const data = dmabuf_map(swd->dh);
+    int i;
+
+    for (i = 0; i != swd->desc.layers[0].nb_planes; ++i) {
+        frame->data[i] = data + swd->desc.layers[0].planes[i].offset;
+        frame->linesize[i] = swd->desc.layers[0].planes[i].pitch;
+    }
+}
+
+// Assumes drmprime_out_env in s->opaque
+int vidout_wayland_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
+{
+    vid_out_env_t * const vc = s->opaque;
+    (void)flags;
+
+    frame->opaque = vc;
+    if ((frame->buf[0] = sw_dmabuf_make(s, vc, frame)) == NULL)
+        return -1;
+    sw_dmabuf_frame_fill(frame, frame->buf[0]);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,9 +830,9 @@ pollq_post_cb(void *v, short revents)
 // External entry points
 
 void
-egl_wayland_out_modeset(wayland_out_env_t *woe, int w, int h, AVRational frame_rate)
+vidout_wayland_modeset(vid_out_env_t *vc, int w, int h, AVRational frame_rate)
 {
-    (void)woe;
+    (void)vc;
     (void)w;
     (void)h;
     (void)frame_rate;
@@ -1083,7 +840,7 @@ egl_wayland_out_modeset(wayland_out_env_t *woe, int w, int h, AVRational frame_r
 }
 
 int
-egl_wayland_out_display(wayland_out_env_t *woe, AVFrame *src_frame)
+vidout_wayland_display(vid_out_env_t *vc, AVFrame *src_frame)
 {
     AVFrame *frame = NULL;
 
@@ -1104,181 +861,131 @@ egl_wayland_out_display(wayland_out_env_t *woe, AVFrame *src_frame)
             return AVERROR(EINVAL);
         }
     }
+    else if (src_frame->opaque == vc) {
+        frame = av_frame_alloc();
+        av_frame_ref(frame, src_frame);
+    }
     else {
         LOG("Frame (format=%d) not DRM_PRiME\n", src_frame->format);
         return AVERROR(EINVAL);
     }
 
-    // If show_all then wait for q_next to be empty otherwise
-    // (run decode @ max speed) just plow on
-    if (woe->show_all) {
-        while (sem_wait(&woe->q_sem) == 0 && errno == EINTR)
-        /* Loop */;
-    }
-
-    pthread_mutex_lock(&woe->q_lock);
-    {
-        AVFrame *const t = woe->q_next;
-        woe->q_next = frame;
-        frame = t;
-    }
-    pthread_mutex_unlock(&woe->q_lock);
-
-    if (frame == NULL)
-        pollqueue_callback_once(woe->wc.pq, do_prod_display, woe);
+    set_vid_par(vc, frame);
+    if (vc->is_egl)
+        do_display_egl(vc, frame);
     else
-        av_frame_free(&frame);
+        do_display_dmabuf(vc, frame);
+    av_frame_free(&frame);
 
     return 0;
 }
 
 
 void
-egl_wayland_out_delete(wayland_out_env_t *woe)
+vidout_wayland_delete(vid_out_env_t *vc)
 {
-    window_ctx_t *const wc = &woe->wc;
-
-    if (woe == NULL)
+    if (vc == NULL)
         return;
 
     LOG("<<< %s\n", __func__);
 
-    if (wc->surface) {
-        wl_surface_attach(wc->surface, NULL, 0, 0);
-        wl_surface_commit(wc->surface);
-        wl_display_flush(wc->w_display);
-    }
+#if HAS_RUNCUBE
+    runcube_way_stop(&vc->rce);
+#endif
+#if HAS_RUNTICKER
+    runticker_stop(&vc->rte);
+#endif
 
-    pollqueue_finish(&wc->pq);
+    // **** EGL teardown
 
-    destroy_window(wc);
-    wl_display_disconnect(wc->w_display);
-    fmt_list_uninit(&wc->fmt_list);
+    pollqueue_finish(&vc->vid_pq);
 
-    av_frame_free(&woe->q_next);
-    sem_destroy(&woe->q_sem);
-    sem_destroy(&woe->egl_setup_sem);
-    pthread_mutex_destroy(&woe->q_lock);
+    wo_surface_detach_fb(vc->vid);
 
-    free(woe);
+    wo_surface_unref(&vc->vid);
+    wo_window_unref(&vc->win);
+    wo_env_unref(&vc->woe);
+
+    dmabuf_pool_kill(&vc->dpool);
+    dmabufs_ctl_unref(&vc->dbsc);
+    free(vc);
 }
 
+static void
+vid_resize_dmabuf_cb(void * v, wo_surface_t * wos, const wo_rect_t win_pos)
+{
+    vid_out_env_t *const ve = v;
 
-static wayland_out_env_t*
+    ve->win_rect = win_pos;
+    wo_surface_dst_pos_set(wos, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
+}
+
+static vid_out_env_t*
 wayland_out_new(const bool is_egl, const unsigned int flags)
 {
-    wayland_out_env_t *const woe = calloc(1, sizeof(*woe));
-    window_ctx_t *const wc = &woe->wc;
+    vid_out_env_t *const ve = calloc(1, sizeof(*ve));
 
     LOG("<<< %s\n", __func__);
 
-    woe->is_egl = is_egl;
-    woe->show_all = !(flags & WOUT_FLAG_NO_WAIT);
+    ve->is_egl = is_egl;
 
-    wc->req_w = WINDOW_WIDTH;
-    wc->req_h = WINDOW_HEIGHT;
+    ve->dbsc = dmabufs_ctl_new();
+    ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32);
 
-    pthread_mutex_init(&woe->q_lock, NULL);
-    sem_init(&woe->egl_setup_sem, 0, 0);
-    sem_init(&woe->q_sem, 0, 1);
+    ve->vid_pq = pollqueue_new();
 
-    fmt_list_init(&wc->fmt_list, 16);
+    ve->woe = wo_env_new_default();
+    ve->win = wo_window_new(ve->woe, (flags & WOUT_FLAG_FULLSCREEN) != 0,
+                            (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT},
+                            ve->is_egl ? "EGL video" : "Dmabuf video");
+    ve->vid = wo_make_surface_z(ve->win, NULL, 10);
+    ve->win_rect = wo_window_size(ve->win);
+    wo_surface_dst_pos_set(ve->vid, ve->win_rect);
 
-    if (get_display_and_registry(woe, wc) != 0)
-        goto fail;
-
-    if (!wc->compositor) {
-        LOG("Missing wayland compositor\n");
-        goto fail;
-    }
-    if (!wc->viewporter) {
-        LOG("Missing wayland viewporter\n");
-        goto fail;
-    }
-    if (!wc->wm_base) {
-        LOG("Missing xdg window manager\n");
-        goto fail;
-    }
-    if (!woe->is_egl && !wc->linux_dmabuf_v1) {
-        LOG("Missing wayland linux_dmabuf extension\n");
-        goto fail;
-    }
-
-    if ((wc->surface = wl_compositor_create_surface(wc->compositor)) == NULL) {
-        LOG("No Compositor surface\n");
-        goto fail;
-    }
-
-    wc->viewport = wp_viewporter_get_viewport(wc->viewporter, wc->surface);
-    wc->wm_surface = xdg_wm_base_get_xdg_surface(wc->wm_base, wc->surface);
-
-    xdg_surface_add_listener(wc->wm_surface, &xdg_surface_listener, woe);
-
-    wc->wm_toplevel = xdg_surface_get_toplevel(wc->wm_surface);
-    xdg_toplevel_add_listener(wc->wm_toplevel, &xdg_toplevel_listener, wc);
-
-    xdg_toplevel_set_title(wc->wm_toplevel,
-                           woe->is_egl ? "EGL video" : "Dmabuf video");
-
-    if ((flags & WOUT_FLAG_FULLSCREEN) != 0)
-        xdg_toplevel_set_fullscreen(wc->wm_toplevel, NULL);
-
-    if (!wc->decoration_manager) {
-        LOG("No decoration manager\n");
-    }
-    else {
-        struct zxdg_toplevel_decoration_v1 *decoration =
-            zxdg_decoration_manager_v1_get_toplevel_decoration(wc->decoration_manager, wc->wm_toplevel);
-        zxdg_toplevel_decoration_v1_add_listener(decoration, &decoration_listener, wc);
-        zxdg_toplevel_decoration_v1_set_mode(decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-        // decoration destroyed in the callback
-    }
-
-    {
-        struct wl_region *const region = wl_compositor_create_region(wc->compositor);
-
-        wl_region_add(region, 0, 0, wc->req_w, wc->req_h);
-        wl_surface_set_opaque_region(wc->surface, region);
-        wl_region_destroy(region);
-
-        LOG("%s: %dx%d\n", __func__, wc->req_w, wc->req_h);
-        wc->window_width = wc->req_w;
-        wc->window_height = wc->req_h;
-    }
-
-    wl_surface_commit(wc->surface);
-
-    wc->pq = pollqueue_new();
-    pollqueue_set_pre_post(wc->pq, pollq_pre_cb, pollq_post_cb, wc);
-
-    LOG("<<< %s\n", __func__);
+    if (!ve->is_egl)
+        wo_surface_on_win_resize_set(ve->vid, vid_resize_dmabuf_cb, ve);
 
     // Some egl setup must be done on display thread
-    if (woe->is_egl) {
-        pollqueue_callback_once(wc->pq, do_egl_setup, woe);
-        sem_wait(&woe->egl_setup_sem);
-        if (woe->egl_setup_fail) {
+    if (ve->is_egl) {
+        if (do_egl_setup(ve) != 0) {
             LOG("EGL init failed\n");
             goto fail;
         }
     }
 
-    return woe;
+    LOG(">>> %s\n", __func__);
+
+    return ve;
 
 fail:
-    egl_wayland_out_delete(woe);
+    vidout_wayland_delete(ve);
     return NULL;
 }
 
-wayland_out_env_t*
-egl_wayland_out_new(unsigned int flags)
+vid_out_env_t*
+vidout_wayland_new(unsigned int flags)
 {
     return wayland_out_new(true, flags);
 }
 
-wayland_out_env_t*
+vid_out_env_t*
 dmabuf_wayland_out_new(unsigned int flags)
 {
     return wayland_out_new(false, flags);
+}
+
+
+void vidout_wayland_runticker(vid_out_env_t * ve, const char * text)
+{
+    static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
+    wo_rect_t r = wo_window_size(ve->win);
+    ve->rte = runticker_start(ve->win, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, text, fontfile);
+}
+
+void vidout_wayland_runcube(vid_out_env_t * ve)
+{
+    wo_rect_t r = wo_window_size(ve->win);
+    unsigned int w = r.w > r.h ? r.h : r.w;
+    ve->rce = runcube_way_start(ve->win, &(wo_rect_t){r.w / 10, r.h / 10, w / 2, w / 2});
 }
 
