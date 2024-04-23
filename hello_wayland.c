@@ -346,10 +346,10 @@ end:
 void usage()
 {
     fprintf(stderr,
-            "Usage: hello_egl_wayland [-d]\n"
-            "                      [-l loop_count] [-f <frames>] [-o yuv_output_file]\n"
-            "                      [--deinterlace] [--pace-input <hz>] [--fullscreen]\n"
-            "                      "
+            "Usage: hello_wayland [-e]\n"
+            "                     [-l <loop_count>] [-f <frames>] [-o <yuv_output_file>]\n"
+            "                     [--deinterlace] [--pace-input <hz>] [--fullscreen]\n"
+            "                     "
 #if HAS_RUNTICKER
             "[--ticker <text>] "
 #endif
@@ -357,8 +357,9 @@ void usage()
             "[--cube] "
 #endif
             "[--no-wait]\n"
-            "                      <input file> [<input_file> ...]\n\n"
+            "                     <input file> [<input_file> ...]\n\n"
             " -e        Use EGL to render video (otherwise direct dmabuf)\n"
+            " -l        Loop video playback <loop_count> times. -1 means forever\n"
             " --cube    Show rotating cube\n"
             " --ticker  Show scrolling ticker with <text> repeated indefinitely\n"
             " --no-wait Decode at max speed, do not wait for display\n");
@@ -691,7 +692,7 @@ retry_hw:
     avcodec_free_context(&decoder_ctx);
     avformat_close_input(&input_ctx);
 
-    if (--loop_count > 0)
+    if (loop_count == -1 || --loop_count > 0)
         goto loopy;
 
     vidout_wayland_delete(dpo);
