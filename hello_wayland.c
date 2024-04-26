@@ -490,7 +490,8 @@ int main(int argc, char *argv[])
 
         in_filelist = a;
         in_count = n + 1;
-        loop_count *= in_count;
+        if (loop_count > 0)
+            loop_count *= in_count;
     }
 
     type = av_hwdevice_find_type_by_name(hwdev);
