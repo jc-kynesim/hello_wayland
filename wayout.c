@@ -79,6 +79,7 @@ struct wo_surface_s {
     atomic_int ref_count;
     struct wo_surface_s * next;
     struct wo_surface_s * prev;
+    bool commit0_done;
 
     wo_env_t * woe;
     wo_window_t * wowin;
@@ -639,9 +640,13 @@ surface_attach_fb_cb(void * v, short revents)
     struct surface_attach_fb_arg_s * const a = v;
     wo_surface_t * const wos = a->wos;
     wo_fb_t * const wofb = a->wofb;
-    bool commit_req_this = false;
-    bool commit_req_parent = false;
+    // 1st time through ensure we commit everything
+    bool commit_req_this = !wos->commit0_done;
+    bool commit_req_parent = !wos->commit0_done && wos->parent != NULL;
     (void)revents;
+
+    // Not the first time anymore
+    wos->commit0_done = true;
 
     if (a->detach) {
         if (wos->wofb != NULL) {
