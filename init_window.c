@@ -974,18 +974,20 @@ dmabuf_wayland_out_new(unsigned int flags)
     return wayland_out_new(false, flags);
 }
 
-
+#if HAS_RUNTICKER
 void vidout_wayland_runticker(vid_out_env_t * ve, const char * text)
 {
     static const char fontfile[] = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf";
     wo_rect_t r = wo_window_size(ve->win);
     ve->rte = runticker_start(ve->win, r.w / 10, r.h * 8 / 10, r.w * 8 / 10, r.h / 10, text, fontfile);
 }
+#endif
 
+#if HAS_RUNCUBE
 void vidout_wayland_runcube(vid_out_env_t * ve)
 {
     wo_rect_t r = wo_window_size(ve->win);
     unsigned int w = r.w > r.h ? r.h : r.w;
     ve->rce = runcube_way_start(ve->win, &(wo_rect_t){r.w / 10, r.h / 10, w / 2, w / 2});
 }
-
+#endif
