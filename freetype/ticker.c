@@ -201,7 +201,7 @@ do_render(ticker_env_t *const te)
     }
 
     wo_fb_write_start(fb0);
-    shl1 = MAX(slot->bitmap_left + slot->bitmap.width, (te->pen.x + slot->advance.x) >> 6) - te->target_width;
+    shl1 = MAX((int)(slot->bitmap_left + slot->bitmap.width), (int)((te->pen.x + slot->advance.x) >> 6)) - te->target_width;
     if (shl1 > 0)
     {
         te->pen.x -= shl1 << 6;
