@@ -100,6 +100,15 @@ typedef struct sw_dmabuf_s {
 #define WINDOW_HEIGHT 720
 
 
+static inline int frame_cropped_width(const AVFrame * const frame)
+{
+    return frame->width - (frame->crop_left + frame->crop_right);
+}
+static inline int frame_cropped_height(const AVFrame * const frame)
+{
+    return frame->height - (frame->crop_top + frame->crop_bottom);
+}
+
 // Remove any params from a modifier
 static inline uint64_t
 canon_mod(const uint64_t m)
@@ -229,8 +238,8 @@ box_rect(const unsigned int par_num, const unsigned int par_den, const wo_rect_t
 static void
 set_vid_par(vid_out_env_t * const ve, const AVFrame * const frame)
 {
-    const unsigned int w = av_frame_cropped_width(frame);
-    const unsigned int h = av_frame_cropped_height(frame);
+    const unsigned int w = frame_cropped_width(frame);
+    const unsigned int h = frame_cropped_height(frame);
     unsigned int par_num = frame->sample_aspect_ratio.num * w;
     unsigned int par_den = frame->sample_aspect_ratio.den * h;
 
@@ -268,8 +277,8 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
         (AVDRMFrameDescriptor * ) frame->data[0] :
         &((sw_dmabuf_t *)(frame->buf[0]->data))->desc;
     const uint32_t format = desc->layers[0].format;
-    const unsigned int width = av_frame_cropped_width(frame);
-    const unsigned int height = av_frame_cropped_height(frame);
+    const unsigned int width = frame_cropped_width(frame);
+    const unsigned int height = frame_cropped_height(frame);
     wo_fb_t * wofb = NULL;
     unsigned int n = 0;
     const uint64_t mod = desc->objects[0].format_modifier;
@@ -406,9 +415,9 @@ do_display_egl(vid_out_env_t * const ve, AVFrame *const frame)
     }
 #endif
     *a++ = EGL_WIDTH;
-    *a++ = av_frame_cropped_width(frame);
+    *a++ = frame_cropped_width(frame);
     *a++ = EGL_HEIGHT;
-    *a++ = av_frame_cropped_height(frame);
+    *a++ = frame_cropped_height(frame);
     *a++ = EGL_LINUX_DRM_FOURCC_EXT;
     *a++ = desc->layers[0].format;
 
