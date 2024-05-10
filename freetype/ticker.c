@@ -15,9 +15,10 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
-#include <wayout.h>
-
 #include <drm_fourcc.h>
+
+#include "fb_pool.h"
+#include "wayout.h"
 
 enum ticker_state_e {
     TICKER_NEW = 0,
@@ -30,7 +31,8 @@ struct ticker_env_s {
 
     wo_window_t *wowin;
     wo_surface_t *dp;
-    wo_fb_t *dfbs[2];
+    fb_pool_t * fbp;
+    wo_fb_t * last_fb;
 
     uint32_t format;
     uint64_t modifier;
@@ -46,7 +48,6 @@ struct ticker_env_s {
     FT_Bool use_kerning;
     FT_UInt previous;
 
-    unsigned int bn;  // Buffer for render
     int shl;          // Scroll left amount (-ve => need a new char)
     int shl_per_run;  // Amount to scroll per run
 
@@ -135,7 +136,7 @@ do_scroll(ticker_env_t *const te)
     }
     else
     {
-        wo_fb_t *const fb0 = te->dfbs[te->bn];
+        wo_fb_t *const fb0 = te->last_fb;
 
 //        printf("tw=%d, pos.w=%d, shl=%d, x=%d\n",
 //               te->target_width, (int)te->base_pos.w, te->shl,
@@ -162,9 +163,14 @@ do_render(ticker_env_t *const te)
     const FT_GlyphSlot slot = te->face->glyph;
     FT_UInt glyph_index;
     int c;
-    wo_fb_t *const fb1 = te->dfbs[te->bn];
-    wo_fb_t *const fb0 = te->dfbs[te->bn ^ 1];
+    wo_fb_t *const fb1 = te->last_fb;
+    wo_fb_t *const fb0 = fb_pool_fb_new(te->fbp, te->target_width, te->base_pos.h, te->format, te->modifier);
     int shl1;
+
+    if (fb0 == NULL) {
+        fprintf(stderr, "Failed to get FB from pool\n");
+        return -1;
+    }
 
     /* set transformation */
     FT_Set_Transform(te->face, &matrix, &te->pen);
@@ -212,12 +218,14 @@ do_render(ticker_env_t *const te)
     draw_bitmap(fb0, &slot->bitmap, slot->bitmap_left - shl1, te->target_height - slot->bitmap_top);
     wo_fb_write_end(fb0);
 
+    wo_fb_unref(&te->last_fb);
+    te->last_fb = fb0;
+
     /* increment pen position */
     te->pen.x += slot->advance.x;
     te->shl += shl1;
 
     te->previous = glyph_index;
-    te->bn ^= 1;
     te->state = TICKER_SCROLL;
     return 1;
 }
@@ -251,15 +259,14 @@ ticker_delete(ticker_env_t **ppTicker)
     if (te == NULL)
         return;
 
-    if (te->dfbs[0])
-    {
+    if (te->last_fb) {
         wo_surface_detach_fb(te->dp);
         wo_surface_commit(te->dp);
     }
 
-    wo_fb_unref(te->dfbs + 0);
-    wo_fb_unref(te->dfbs + 1);
+    wo_fb_unref(&te->last_fb);
     wo_surface_unref(&te->dp);
+    fb_pool_kill(&te->fbp);
 
     FT_Done_Face(te->face);
     FT_Done_FreeType(te->library);
@@ -270,20 +277,18 @@ ticker_delete(ticker_env_t **ppTicker)
 int
 ticker_init(ticker_env_t *const te)
 {
-    wo_env_t * const woe = wo_window_env(te->wowin);
-    for (unsigned int i = 0; i != 2; ++i)
-    {
-        te->dfbs[i] = wo_make_fb(woe, te->target_width, te->base_pos.h, te->format, te->modifier);
-        if (te->dfbs[i] == NULL)
-        {
-            fprintf(stderr, "Failed to get frame buffer");
-            return -1;
-        }
+    wo_fb_t *const fb0 = fb_pool_fb_new(te->fbp, te->target_width, te->base_pos.h, te->format, te->modifier);
+
+    if (fb0 == NULL) {
+        fprintf(stderr, "Failed to get frame buffer");
+        return -1;
     }
 
-    wo_fb_write_start(te->dfbs[0]);
-    memset(wo_fb_data(te->dfbs[0], 0), 0x00, wo_fb_height(te->dfbs[0]) * wo_fb_pitch(te->dfbs[0], 0));
-    wo_fb_write_end(te->dfbs[0]);
+    wo_fb_write_start(fb0);
+    memset(wo_fb_data(fb0, 0), 0x00, wo_fb_height(fb0) * wo_fb_pitch(fb0, 0));
+    wo_fb_write_end(fb0);
+    te->last_fb = fb0;
+
     return 0;
 }
 
@@ -364,6 +369,11 @@ ticker_new(struct wo_window_s * wowin, const wo_rect_t pos, const wo_rect_t win_
     if (FT_Init_FreeType(&te->library) != 0)
     {
         fprintf(stderr, "Failed to init FreeType");
+        goto fail;
+    }
+
+    if ((te->fbp = fb_pool_new_fbs(wo_window_env(wowin), 4)) == NULL) {
+        fprintf(stderr, "%s: FB pool create fail\n", __func__);
         goto fail;
     }
 

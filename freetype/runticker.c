@@ -49,7 +49,8 @@ runticker_thread(void * v)
 {
     runticker_env_t * const dfte = v;
 
-    while (!atomic_load(&dfte->kill) && ticker_run(dfte->te) >= 0) {
+    while (!atomic_load(&dfte->kill)) {
+        ticker_run(dfte->te);
         usleep(20000);
     }
 
