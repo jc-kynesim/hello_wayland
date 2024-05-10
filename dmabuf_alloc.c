@@ -54,7 +54,7 @@ struct dmabuf_h {
     unsigned int flags;
 
     void * predel_v;
-    int (* predel_fn)(struct dmabuf_h * dh, void * v);
+    dmabuf_predel_fn predel_fn;
 };
 
 #if TRACE_ALLOC
@@ -160,8 +160,12 @@ void dmabuf_unref(struct dmabuf_h ** const ppdh)
     if (n != 0)
         return;
 
-    if (dh->predel_fn && dh->predel_fn(dh, dh->predel_v) != 0)
-        return;
+    if (dh->predel_fn) {
+        // If we have a predel callback then restore a ref before calling
+        dmabuf_ref(dh);
+        if (dh->predel_fn(dh, dh->predel_v) != 0)
+            return;
+    }
 
     dmabuf_free(dh);
 }
@@ -178,7 +182,7 @@ struct dmabuf_h * dmabuf_ref(struct dmabuf_h * const dh)
 }
 
 void dmabuf_predel_cb_set(struct dmabuf_h * const dh,
-                          int (* const predel_fn)(struct dmabuf_h * dh, void * v), void * const predel_v)
+                          const dmabuf_predel_fn predel_fn, void * const predel_v)
 {
     dh->predel_fn = predel_fn;
     dh->predel_v  = predel_v;

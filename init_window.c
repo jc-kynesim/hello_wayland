@@ -913,11 +913,11 @@ vidout_wayland_delete(vid_out_env_t *vc)
 
     wo_surface_unref(&vc->vid);
     wo_window_unref(&vc->win);
-    wo_env_unref(&vc->woe);
-
+    wo_env_finish(&vc->woe);
     dmabuf_pool_kill(&vc->dpool);
     dmabufs_ctl_unref(&vc->dbsc);
     free(vc);
+    LOG(">>> %s\n", __func__);
 }
 
 static void
@@ -938,16 +938,37 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
 
     ve->is_egl = is_egl;
 
-    ve->dbsc = dmabufs_ctl_new();
-    ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32);
+    if ((ve->dbsc = dmabufs_ctl_new()) == NULL) {
+        LOG("%s: Failed to create dmbauf control\n", __func__);
+        goto fail;
+    }
 
-    ve->vid_pq = pollqueue_new();
+    if ((ve->dpool = dmabuf_pool_new_dmabufs(ve->dbsc, 32)) == NULL) {
+        LOG("%s: Failed to create dmbauf pool\n", __func__);
+        goto fail;
+    }
 
-    ve->woe = wo_env_new_default();
-    ve->win = wo_window_new(ve->woe, (flags & WOUT_FLAG_FULLSCREEN) != 0,
+    if ((ve->vid_pq = pollqueue_new()) == NULL) {
+        LOG("%s: Failed to create pollq\n", __func__);
+        goto fail;
+    }
+
+    if ((ve->woe = wo_env_new_default()) == NULL) {
+        LOG("%s: Failed to create window environment\n", __func__);
+        goto fail;
+    }
+
+    if ((ve->win = wo_window_new(ve->woe, (flags & WOUT_FLAG_FULLSCREEN) != 0,
                             (wo_rect_t) {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT},
-                            ve->is_egl ? "EGL video" : "Dmabuf video");
-    ve->vid = wo_make_surface_z(ve->win, NULL, 10);
+                            ve->is_egl ? "EGL video" : "Dmabuf video")) == NULL) {
+        LOG("%s: Failed to create window\n", __func__);
+        goto fail;
+    }
+
+    if ((ve->vid = wo_make_surface_z(ve->win, NULL, 10)) == NULL) {
+        LOG("%s: Failed to create window surface\n", __func__);
+        goto fail;
+    }
     ve->win_rect = wo_window_size(ve->win);
     wo_surface_dst_pos_set(ve->vid, ve->win_rect);
 

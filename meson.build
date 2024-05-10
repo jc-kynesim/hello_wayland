@@ -22,6 +22,7 @@ wl_sources = [
     'init_window.c',
 	'wayout.c',
 	'dmabuf_pool.c',
+	'generic_pool.c',
 	'dmabuf_alloc.c',
 	'pollqueue.c',
 ]

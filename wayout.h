@@ -73,7 +73,7 @@ wo_fb_t * wo_make_fb(wo_env_t * dpo, uint32_t width, uint32_t height, uint32_t f
 wo_fb_t * wo_fb_ref(wo_fb_t * wfb);
 void wo_fb_unref(wo_fb_t ** ppwfb);
 
-typedef bool (* wo_fb_pre_delete_fn)(void * v, struct wo_fb_s * wofb);
+typedef int (* wo_fb_pre_delete_fn)(struct wo_fb_s * wofb, void * v);
 typedef void (* wo_fb_on_delete_fn)(void * v);
 typedef void (* wo_fb_on_release_fn)(void * v, struct wo_fb_s * wofb);
 
@@ -85,6 +85,8 @@ void wo_fb_on_release_unset(wo_fb_t * const wofb);
 
 unsigned int wo_fb_width(const wo_fb_t * wfb);
 unsigned int wo_fb_height(const wo_fb_t * wfb);
+uint32_t wo_fb_fmt(const wo_fb_t * const wfb);
+uint64_t wo_fb_mod(const wo_fb_t * const wfb);
 unsigned int wo_fb_pitch(const wo_fb_t * wfb, const unsigned int plane);
 void * wo_fb_data(const wo_fb_t * wfb, const unsigned int plane);
 
@@ -124,6 +126,9 @@ struct pollqueue * wo_env_pollqueue(const wo_env_t * const woe);
 int wo_env_sync(wo_env_t * const woe);
 wo_env_t * wo_env_ref(wo_env_t * const woe);
 void wo_env_unref(wo_env_t ** const ppWoe);
+// Unrefs the wo_env and waits for up to a second for everything else to finish
+// with it before returning
+void wo_env_finish(wo_env_t ** const ppWoe);
 wo_env_t * wo_env_new_default(void);
 
 #ifdef __cplusplus

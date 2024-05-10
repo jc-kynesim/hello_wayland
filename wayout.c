@@ -72,6 +72,8 @@ struct wo_fb_s {
     void * pre_delete_v;
     wo_fb_on_release_fn on_release_fn;
     void * on_release_v;
+    bool on_release_fence;
+    bool listener_set;
 };
 
 
@@ -80,11 +82,12 @@ struct wo_surface_s {
     struct wo_surface_s * next;
     struct wo_surface_s * prev;
     bool commit0_done;
+    bool wowin_unrefed;
 
     wo_env_t * woe;
     wo_window_t * wowin;
     wo_surface_t * parent;  // No ref - just a pointer (currently)
-    wo_fb_t * wofb;         // Currently attached fb
+    wo_fb_t * wofb_weak;    // Currently attached fb - do not use for anything other than change check = no ref
     unsigned int zpos;
 
     wo_rect_t src_pos;      // Last viewport src set
@@ -139,7 +142,31 @@ struct wo_env_s {
     fmt_list_t fmt_list;
 
     struct wl_region * region_all;
+
+    sem_t * finish_sem;
 };
+
+#define TRACE_REFS  0
+
+#if !TRACE_REFS
+#define REF(s) do {if (s) atomic_fetch_add(&(s)->ref_count, 1);} while(0)
+#define UNREF(s) do {if (!(s)) return; else {\
+        const int n = atomic_fetch_sub(&(s)->ref_count, 1);\
+        assert(n >= 0);\
+        if (n) return;\
+}} while (0)
+#else
+#define REF(s) do {if (s) {\
+        const int n = atomic_fetch_add(&(s)->ref_count, 1);\
+        printf("%s[%p]: n=%d\n", __func__, (void*)(s), n + 1);\
+}} while (0)
+#define UNREF(s) do {if (!(s)) return; else {\
+        const int n = atomic_fetch_sub(&(s)->ref_count, 1);\
+        assert(n >= 0);\
+        printf("%s[%p] n=%d\n", __func__, (void*)(s), n);\
+        if (n) return;\
+}} while (0)
+#endif
 
 // ---------------------------------------------------------------------------
 //
@@ -372,6 +399,7 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
     wofb->fmt = fmt;
     wofb->mod = mod;
     wofb->plane_count = planes;
+    wofb->on_release_fence = !dmabuf_is_fake(dhs[0]);
 
     for (i = 0; i != objs; ++i)
         wofb->dh[i] = dhs[i];   // ref???
@@ -427,8 +455,7 @@ fail:
 wo_fb_t *
 wo_fb_ref(wo_fb_t * wfb)
 {
-    if (wfb != NULL)
-        atomic_fetch_add(&wfb->ref_count, 1);
+    REF(wfb);
     return wfb;
 }
 
@@ -437,17 +464,16 @@ wo_fb_unref(wo_fb_t ** ppwfb)
 {
     wo_fb_t * wofb = *ppwfb;
     unsigned int i;
-    int n;
 
-    if (wofb == NULL)
-        return;
+    *ppwfb = NULL;
+    UNREF(wofb);
 
-    n = atomic_fetch_sub(&wofb->ref_count, 1);
-//    LOG("%s: n=%d\n", __func__, n);
-    if (n != 0)
-        return;
+    if (wofb->pre_delete_fn) {
+        wo_fb_ref(wofb);
+        if (wofb->pre_delete_fn(wofb, wofb->pre_delete_v) != 0)
+            return;
+    }
 
-    if (!wofb->pre_delete_fn || !wofb->pre_delete_fn(wofb->pre_delete_v, wofb))
     {
         const wo_fb_on_delete_fn on_delete_fn = wofb->on_delete_fn;
         void * const on_delete_v = wofb->on_delete_v;
@@ -507,14 +533,11 @@ fb_release_fence2_cb(void * v, short revents)
 static void
 fb_release_fence_cb(void *data, struct wl_buffer *wl_buffer)
 {
-    wo_fb_t * const wofb = data;
-    struct fb_fence_wait_s * const ffs = malloc(sizeof(*ffs));
+    struct fb_fence_wait_s * ffs = data;
     (void)wl_buffer;
 
 //    LOG("%s\n", __func__);
 
-    ffs->wofb = wofb;
-    ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), POLLOUT, fb_release_fence2_cb, ffs);
     pollqueue_add_task(ffs->pt, 1000);
 }
 
@@ -531,17 +554,38 @@ fb_release_no_fence_cb(void *data, struct wl_buffer *wl_buffer)
 void
 wo_fb_on_release_set(wo_fb_t * const wofb, bool wait_for_fence, wo_fb_on_release_fn const fn, void * const v)
 {
-    static const struct wl_buffer_listener no_fence_listener = {
-        .release = fb_release_no_fence_cb
-    };
-    static const struct wl_buffer_listener fence_listener = {
-        .release = fb_release_fence_cb
-    };
-
     wofb->on_release_fn = fn;
     wofb->on_release_v = v;
+    wofb->on_release_fence = wait_for_fence;
+}
 
-    wl_buffer_add_listener(wofb->way_buf, wait_for_fence ? &fence_listener : &no_fence_listener, wo_fb_ref(wofb));
+static void
+fb_on_release_setup(wo_fb_t * const wofb)
+{
+    if (wofb->on_release_fence) {
+        struct fb_fence_wait_s * const ffs = malloc(sizeof(*ffs));
+        static const struct wl_buffer_listener fence_listener = {
+            .release = fb_release_fence_cb
+        };
+
+        ffs->wofb = wo_fb_ref(wofb);
+        ffs->pt = polltask_new(wofb->woe->pq, dmabuf_fd(wofb->dh[0]), POLLOUT, fb_release_fence2_cb, ffs);
+        if (wofb->listener_set)
+            wl_buffer_set_user_data(wofb->way_buf, ffs);
+        else
+            wl_buffer_add_listener(wofb->way_buf, &fence_listener, ffs);
+    }
+    else {
+        static const struct wl_buffer_listener no_fence_listener = {
+            .release = fb_release_no_fence_cb
+        };
+
+        if (wofb->listener_set)
+            wl_buffer_set_user_data(wofb->way_buf, wo_fb_ref(wofb));
+        else
+            wl_buffer_add_listener(wofb->way_buf, &no_fence_listener, wo_fb_ref(wofb));
+    }
+    wofb->listener_set = true;
 }
 
 void
@@ -567,6 +611,18 @@ unsigned int
 wo_fb_pitch(const wo_fb_t * wfb, const unsigned int plane)
 {
     return plane >= wfb->plane_count ? 0 : wfb->stride[plane];
+}
+
+uint32_t
+wo_fb_fmt(const wo_fb_t * const wfb)
+{
+    return wfb->fmt;
+}
+
+uint64_t
+wo_fb_mod(const wo_fb_t * const wfb)
+{
+    return wfb->mod;
 }
 
 void *
@@ -649,19 +705,20 @@ surface_attach_fb_cb(void * v, short revents)
     wos->commit0_done = true;
 
     if (a->detach) {
-        if (wos->wofb != NULL) {
+//        if (wos->wofb != NULL) {
             wl_surface_attach(wos->s.surface, NULL, 0, 0);
-            wl_surface_commit(wos->s.surface);
-            wo_fb_unref(&wos->wofb);
-        }
+            wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
+            wos->wofb_weak = NULL;
+            commit_req_this = true;
+//        }
     }
     else {
         const bool use_dst = (a->dst_pos.w != 0 && a->dst_pos.h != 0);
-        if (wofb != NULL && wofb != wos->wofb) {
+        if (wofb != NULL && wofb != wos->wofb_weak) {
             wl_surface_attach(wos->s.surface, wofb->way_buf, 0, 0);
             wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
-            wo_fb_unref(&wos->wofb);
-            wos->wofb = wo_fb_ref(wofb);
+            wos->wofb_weak = wofb;
+            fb_on_release_setup(wofb);
             commit_req_this = true;
         }
         if (wofb != NULL &&
@@ -687,11 +744,11 @@ surface_attach_fb_cb(void * v, short revents)
             }
             wos->dst_pos = a->dst_pos;
         }
-        if (commit_req_this)
-            wl_surface_commit(wos->s.surface);
-        if (commit_req_parent)
-            wl_surface_commit(wos->parent->s.surface); // Need parent commit for position
     }
+    if (commit_req_this)
+        wl_surface_commit(wos->s.surface);
+    if (commit_req_parent)
+        wl_surface_commit(wos->parent->s.surface); // Need parent commit for position
 
     surface_attach_fb_free(a);
 }
@@ -721,7 +778,7 @@ wo_surface_attach_fb(wo_surface_t * wos, wo_fb_t * wofb, const wo_rect_t dst_pos
 int
 wo_surface_detach_fb(wo_surface_t * wos)
 {
-    return wo_surface_attach_fb(wos, NULL, (wo_rect_t){0,0,0,0});
+    return (wos == NULL) ? 0 : wo_surface_attach_fb(wos, NULL, (wo_rect_t){0,0,0,0});
 }
 
 
@@ -773,6 +830,16 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     }
     pthread_mutex_unlock(&wowin->surface_lock);
     return wos;
+}
+
+// Remove teh ref from the surface to the window
+// Required for the base layer which is held by the window to avoid ref loop
+static void
+surface_window_unref(wo_surface_t * const wos)
+{
+    wo_window_t * wowin = wos->wowin;
+    wos->wowin_unrefed = true;
+    wo_window_unref(&wowin);
 }
 
 bool
@@ -844,39 +911,39 @@ static void
 surface_free(wo_surface_t * const wos)
 {
     wo_window_t *const wowin = wos->wowin;
-    pthread_mutex_lock(&wowin->surface_lock);
-    {
+    if (!wos->wowin_unrefed) {
+        pthread_mutex_lock(&wowin->surface_lock);
         if (wos->prev == NULL)
             wowin->surface_chain = wos->next;
         else
             wos->prev->next = wos->next;
         if (wos->next != NULL)
             wos->next->prev = wos->prev;
+        pthread_mutex_unlock(&wowin->surface_lock);
     }
-    pthread_mutex_unlock(&wowin->surface_lock);
     if (wos->egl_window)
         wl_egl_window_destroy(wos->egl_window);
+//    wo_fb_unref(&wos->wofb);
     plane_destroy(&wos->s);
-    wo_window_unref(&wos->wowin);
+    if (!wos->wowin_unrefed)
+        wo_window_unref(&wos->wowin);
     free(wos);
 }
 
 void
 wo_surface_unref(wo_surface_t ** ppWs)
 {
-    wo_surface_t * const ws = *ppWs;
+    wo_surface_t * const wos = *ppWs;
 
-    if (ws == NULL)
-        return;
-    if (atomic_fetch_sub(&ws->ref_count, 1) == 0)
-        surface_free(ws);
+    *ppWs = NULL;
+    UNREF(wos);
+    surface_free(wos);
 }
 
 wo_surface_t *
 wo_surface_ref(wo_surface_t * const wos)
 {
-    if (wos != NULL)
-        atomic_fetch_add(&wos->ref_count, 1);
+    REF(wos);
     return wos;
 }
 
@@ -1017,7 +1084,13 @@ wo_window_size(const wo_window_t * const wowin)
 static void
 window_free(wo_window_t * const wowin)
 {
-    free((char*)wowin->title);
+    wo_surface_detach_fb(wowin->wos);
+    if (wowin->wm_toplevel)
+        xdg_toplevel_destroy(wowin->wm_toplevel);
+    if (wowin->wm_surface)
+        xdg_surface_destroy(wowin->wm_surface);
+    wo_surface_unref(&wowin->wos);
+    free((char *)wowin->title);
     wo_env_unref(&wowin->woe);
     free(wowin);
 }
@@ -1081,6 +1154,8 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
 
     // We have now setup enough that we can make a surface on ourselves
     wowin->wos = wo_make_surface_z(wowin, NULL, 0);
+    // Remove circular ref
+    surface_window_unref(wowin->wos);
     wo_surface_on_win_resize_set(wowin->wos, window_win_resize_cb, NULL);
 
     wowin->sync_wait = true;
@@ -1092,6 +1167,7 @@ wo_window_new(wo_env_t * const woe, bool fullscreen, const wo_rect_t pos, const 
     wowin->sync_wait = true;
     wofb = wo_fb_new_rgba_pixel(woe, 0, 0, 0, UINT32_MAX);
     wo_surface_attach_fb(wowin->wos, wofb, wowin->pos);
+    wo_fb_unref(&wofb);
 
     // This is somewhat kludgy but we always seem to get a 2nd configure after
     // the attach which includes fullscreen if applied
@@ -1104,16 +1180,16 @@ void
 wo_window_unref(wo_window_t ** const ppWowin)
 {
     wo_window_t * const wowin = *ppWowin;
-    if (wowin == NULL)
-        return;
-    if (atomic_fetch_sub(&wowin->ref_count, 1) == 0)
-        window_free(wowin);
+
+    *ppWowin = NULL;
+    UNREF(wowin);
+    window_free(wowin);
 }
 
 wo_window_t *
 wo_window_ref(wo_window_t * const wowin)
 {
-    atomic_fetch_add(&wowin->ref_count, 1);
+    REF(wowin);
     return wowin;
 }
 
@@ -1323,8 +1399,7 @@ wo_env_pollqueue(const wo_env_t * const woe)
 wo_env_t *
 wo_env_ref(wo_env_t * const woe)
 {
-    if (woe != NULL)
-        atomic_fetch_add(&woe->ref_count, 1);
+    REF(woe);
     return woe;
 }
 
@@ -1373,10 +1448,12 @@ wo_env_sync(wo_env_t * const woe)
     return rv;
 }
 
+
 static void
-env_free(wo_env_t * const woe)
+pollq_exit(void * v)
 {
-    pollqueue_finish(&woe->pq);
+    wo_env_t * const woe = v;
+    sem_t * const finish_sem = woe->finish_sem;
 
     if (woe->wm_base)
         xdg_wm_base_destroy(woe->wm_base);
@@ -1394,25 +1471,67 @@ env_free(wo_env_t * const woe)
         wl_compositor_destroy(woe->compositor);
     region_destroy(&woe->region_all);
 
-    wl_display_roundtrip(woe->w_display);
-
-    wl_display_disconnect(woe->w_display);
+    if (woe->w_display != NULL) {
+        wl_display_roundtrip(woe->w_display);
+        wl_display_roundtrip(woe->w_display);
+        wl_display_disconnect(woe->w_display);
+    }
 
     dmabufs_ctl_unref(&woe->dbsc);
 
     fmt_list_uninit(&woe->fmt_list);
 
     free(woe);
+
+    if (finish_sem != NULL)
+        sem_post(finish_sem);
+}
+
+static void
+env_free(wo_env_t * const woe)
+{
+    if (woe->pq != NULL)
+        pollqueue_unref(&woe->pq);
+    else
+        pollq_exit(woe);
 }
 
 void
 wo_env_unref(wo_env_t ** const ppWoe)
 {
     wo_env_t * const woe = *ppWoe;
-    if (woe == NULL)
+
+    *ppWoe = NULL;
+    UNREF(woe);
+    env_free(woe);
+}
+
+void
+wo_env_finish(wo_env_t ** const ppWoe)
+{
+    wo_env_t * const woe = *ppWoe;
+    sem_t finish_sem;
+    struct timespec ts;
+    int rv;
+
+    if (!woe)
         return;
+
+    *ppWoe = NULL;
+    sem_init(&finish_sem, 0, 0);
+    woe->finish_sem = &finish_sem;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 1;
+
     if (atomic_fetch_sub(&woe->ref_count, 1) == 0)
         env_free(woe);
+
+    while ((rv = sem_timedwait(&finish_sem, &ts)) == -1 && errno == EINTR)
+        /* loop */;
+
+    if (rv == -1)
+        LOG("%s: Shutdown timeout\n", __func__);
+    sem_destroy(&finish_sem);
 }
 
 wo_env_t *
@@ -1459,6 +1578,7 @@ wo_env_new_default(void)
     wl_region_add(woe->region_all, 0, 0, INT32_MAX, INT32_MAX);
 
     pollqueue_set_pre_post(woe->pq, pollq_pre_cb, pollq_post_cb, woe);
+    pollqueue_set_exit(woe->pq, pollq_exit, woe);
 
     return woe;
 

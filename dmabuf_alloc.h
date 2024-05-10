@@ -47,8 +47,15 @@ void dmabuf_len_set(struct dmabuf_h * const dh, const size_t len);
 /* Are these real dmabufs (false) or is this just something else mmapable (true) */
 bool dmabuf_is_fake(const struct dmabuf_h * const dh);
 
+// Called before delete when ref count has hit 0
+// Ref is reset to 1 before call
+// Return:
+//  0   Delete dmabuf (do not unref in callback)
+//  1   Keep dmabuf
+typedef int (* dmabuf_predel_fn)(struct dmabuf_h * dh, void * v);
+
 void dmabuf_predel_cb_set(struct dmabuf_h * const dh,
-                          int (* const predel_fn)(struct dmabuf_h * dh, void * v), void * const predel_v);
+                          const dmabuf_predel_fn predel_fn, void * const predel_v);
 static inline void dmabuf_predel_cb_unset(struct dmabuf_h * const dh) {dmabuf_predel_cb_set(dh, 0, NULL);}
 
 void dmabuf_unref(struct dmabuf_h ** const ppdh);
