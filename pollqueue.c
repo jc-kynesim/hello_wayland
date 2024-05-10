@@ -60,6 +60,9 @@ struct pollqueue {
         void *v;
     } prepost;
 
+    void (* exit_fn)(void * v);
+    void * exit_v;
+
     bool kill;
     bool join_req;  // On thread exit do not detach
     bool no_prod;
@@ -380,13 +383,21 @@ static void *poll_thread(void *v)
     pthread_mutex_unlock(&pq->lock);
 fail_unlocked:
 
-    polltask_free(pq->prod_pt);
-    pthread_cond_destroy(&pq->cond);
-    pthread_mutex_destroy(&pq->lock);
-    close(pq->prod_fd);
-    if (!pq->join_req)
-        pthread_detach(pthread_self());
-    free(pq);
+    {
+        void (*const exit_fn)(void *v) = pq->exit_fn;
+        void * const exit_v = pq->exit_v;
+
+        polltask_free(pq->prod_pt);
+        pthread_cond_destroy(&pq->cond);
+        pthread_mutex_destroy(&pq->lock);
+        close(pq->prod_fd);
+        if (!pq->join_req)
+            pthread_detach(pthread_self());
+        free(pq);
+
+        if (exit_fn)
+            exit_fn(exit_v);
+    }
 
     return NULL;
 }
@@ -523,5 +534,12 @@ void pollqueue_set_pre_post(struct pollqueue *const pq,
             rv = pthread_cond_wait(&pq->cond, &pq->lock);
     }
     pthread_mutex_unlock(&pq->lock);
+}
+
+void pollqueue_set_exit(struct pollqueue *const pq,
+                        void (* const exit_fn)(void * v), void * v)
+{
+    pq->exit_fn = exit_fn;
+    pq->exit_v = v;
 }
 

@@ -80,4 +80,8 @@ void pollqueue_set_pre_post(struct pollqueue *const pq,
                             void (*fn_post)(void *v, short revents),
                             void *v);
 
+// Set callback to execture on the poll thread when it exits
+void pollqueue_set_exit(struct pollqueue *const pq,
+                        void (* const exit_fn)(void * v), void * v);
+
 #endif /* POLLQUEUE_H_ */
