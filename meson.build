@@ -25,7 +25,6 @@ wl_sources = [
 	'fb_pool.c',
 	'generic_pool.c',
 	'dmabuf_alloc.c',
-	'pollqueue.c',
 ]
 
 wl_headers = [
@@ -74,6 +73,7 @@ executable('hello_wayland',
   dependencies : [wl_client_dep, wl_protocol_dep, wl_egl_dep, epoxy_dep, libdrm_dep,
     threads_dep,
     dep_rt,
+    dependency('pollqueue'),
     dependency('libavcodec'),
     dependency('libavfilter'),
     dependency('libavformat'),
