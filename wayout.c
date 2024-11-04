@@ -62,7 +62,7 @@ struct wo_fb_s {
     size_t offset[WO_FB_PLANES];
     size_t obj_no[WO_FB_PLANES];
     uint64_t mod;
-    wo_rect_t crop;
+    wo_rect_t crop;   // 16.16 fixed
 
     struct wl_buffer *way_buf;
 
@@ -90,8 +90,8 @@ struct wo_surface_s {
     wo_fb_t * wofb_weak;    // Currently attached fb - do not use for anything other than change check = no ref
     unsigned int zpos;
 
-    wo_rect_t src_pos;      // Last viewport src set
-    wo_rect_t dst_pos;      // Viewport dst size & subsurface pos
+    wo_rect_t src_pos;      // Last viewport src set (16.16)
+    wo_rect_t dst_pos;      // Viewport dst size & subsurface pos (int)
     wo_surface_fns_t fns;
     struct wl_egl_window * egl_window;
 
@@ -725,6 +725,7 @@ surface_attach_fb_cb(void * v, short revents)
             (wofb->crop.x != wos->src_pos.x || wofb->crop.y != wos->src_pos.y ||
              wofb->crop.w != wos->src_pos.w || wofb->crop.h != wos->src_pos.h)) {
             if (wofb->crop.w != 0 && wofb->crop.h != 0) {
+                // We have 16.16 crop (as DRM) wl has 24.8
                 wp_viewport_set_source(wos->s.viewport,
                                        wofb->crop.x >> 8, wofb->crop.y >> 8,
                                        wofb->crop.w >> 8, wofb->crop.h >> 8);

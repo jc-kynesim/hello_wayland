@@ -90,6 +90,7 @@ uint64_t wo_fb_mod(const wo_fb_t * const wfb);
 unsigned int wo_fb_pitch(const wo_fb_t * wfb, const unsigned int plane);
 void * wo_fb_data(const wo_fb_t * wfb, const unsigned int plane);
 
+// crop is expected to be in 16.16 fixed point format
 void wo_fb_crop_frac_set(wo_fb_t * wfb, const wo_rect_t crop);
 
 void wo_fb_write_start(wo_fb_t * wfb);
