@@ -725,10 +725,19 @@ surface_attach_fb_cb(void * v, short revents)
             (wofb->crop.x != wos->src_pos.x || wofb->crop.y != wos->src_pos.y ||
              wofb->crop.w != wos->src_pos.w || wofb->crop.h != wos->src_pos.h)) {
             if (wofb->crop.w != 0 && wofb->crop.h != 0) {
+                // Wayland: Src set but not dest w/h gives 1:1 scale (i.e. crop) src must be int
+                // or we will get protocol errors
                 // We have 16.16 crop (as DRM) wl has 24.8
-                wp_viewport_set_source(wos->s.viewport,
-                                       wofb->crop.x >> 8, wofb->crop.y >> 8,
-                                       wofb->crop.w >> 8, wofb->crop.h >> 8);
+                if ((wos->dst_pos.w == 0 || wos->dst_pos.h == 0) && !use_dst) {
+                    wp_viewport_set_source(wos->s.viewport,
+                                           (wofb->crop.x >> 8) & ~0xff, (wofb->crop.y >> 8) & ~0xff,
+                                           ((wofb->crop.w >> 8) + 0xff) & ~0xff, ((wofb->crop.h >> 8) + 0xff) & ~0xff);
+                }
+                else {
+                    wp_viewport_set_source(wos->s.viewport,
+                                           wofb->crop.x >> 8, wofb->crop.y >> 8,
+                                           wofb->crop.w >> 8, wofb->crop.h >> 8);
+                }
                 wos->src_pos = wofb->crop;
                 commit_req_this = true;
             }
