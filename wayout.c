@@ -355,7 +355,7 @@ wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64
     wofb->height = height;
     wofb->plane_count = 1;
     wofb->stride[0] = width * 4;  // *** Proper fmt calc would be good!
-    wofb->crop = (wo_rect_t){0,0,width,height};
+    // Leave crop unset (0 => no crop)
     if ((wofb->dh[0] = dmabuf_alloc(woe->dbsc, height * wofb->stride[0])) == NULL)
         goto fail;
     wofb->obj_count = 1;
