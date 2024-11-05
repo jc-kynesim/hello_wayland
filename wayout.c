@@ -24,6 +24,7 @@
 // protocol headers that we build as part of the compile
 #include "viewporter-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "presentation-time-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
@@ -98,6 +99,11 @@ struct wo_surface_s {
     wo_surface_win_resize_fn win_resize_fn;
     void * win_resize_v;
 
+    bool presentation_req;
+    wo_surface_stats_t stats;
+    unsigned int w_discarded;
+    unsigned int w_presented;
+
     subplane_t s;
 };
 
@@ -137,7 +143,9 @@ struct wo_env_s {
     struct wp_viewporter *viewporter;
     struct xdg_wm_base *wm_base;
     struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
-
+    struct wp_presentation *presentation;
+    // Presentation clock id (CLOCK_xxx)
+    int presentation_clock_id;
     // Dmabuf fmts
     fmt_list_t fmt_list;
 
@@ -668,6 +676,65 @@ wo_fb_read_end(wo_fb_t * wfb)
         dmabuf_read_end(wfb->dh[i]);
 }
 
+//----------------------------------------------------------------------------
+
+static void
+presentation_sync_output_cb(void *data,
+            struct wp_presentation_feedback *wp_presentation_feedback,
+            struct wl_output *output)
+{
+    (void)data;
+    (void)wp_presentation_feedback;
+    (void)output;
+}
+
+// Presented/Discarded can occur after close has finished so need to
+static void
+presentation_presented_cb(void *data,
+          struct wp_presentation_feedback *wp_presentation_feedback,
+          uint32_t tv_sec_hi,
+          uint32_t tv_sec_lo,
+          uint32_t tv_nsec,
+          uint32_t refresh,
+          uint32_t seq_hi,
+          uint32_t seq_lo,
+          uint32_t flags)
+{
+    wo_surface_t * wos = data;
+    (void)tv_sec_hi;
+    (void)tv_sec_lo;
+    (void)tv_nsec;
+    (void)refresh;
+    (void)seq_hi;
+    (void)seq_lo;
+    (void)flags;
+
+    wp_presentation_feedback_destroy(wp_presentation_feedback);
+
+    ++wos->stats.presented_count;
+    wo_surface_unref(&wos);
+}
+
+static void
+presentation_discarded_cb(void *data,
+          struct wp_presentation_feedback *wp_presentation_feedback)
+{
+    wo_surface_t * wos = data;
+
+    wp_presentation_feedback_destroy(wp_presentation_feedback);
+
+    ++wos->stats.discarded_count;
+    wo_surface_unref(&wos);
+}
+
+static const struct wp_presentation_feedback_listener presentation_feedback_listener = {
+    .sync_output = presentation_sync_output_cb,
+    .presented = presentation_presented_cb,
+    .discarded = presentation_discarded_cb,
+};
+
+//----------------------------------------------------------------------------
+
 int
 wo_surface_commit(wo_surface_t * wsurf)
 {
@@ -720,6 +787,12 @@ surface_attach_fb_cb(void * v, short revents)
             wos->wofb_weak = wofb;
             fb_on_release_setup(wofb);
             commit_req_this = true;
+
+            if (wos->presentation_req || 1) {
+                struct wp_presentation_feedback * feedback =
+                    wp_presentation_feedback(wos->woe->presentation, wos->s.surface);
+                wp_presentation_feedback_add_listener(feedback, &presentation_feedback_listener, wo_surface_ref(wos));
+            }
         }
         if (wofb != NULL &&
             (wofb->crop.x != wos->src_pos.x || wofb->crop.y != wos->src_pos.y ||
@@ -840,6 +913,23 @@ wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned in
     }
     pthread_mutex_unlock(&wowin->surface_lock);
     return wos;
+}
+
+const wo_surface_stats_t *
+wo_surface_stats_get(wo_surface_t * const wos)
+{
+    return &wos->stats;
+}
+
+int
+wo_surface_stats_enable(wo_surface_t * const wos)
+{
+    if (!wos)
+        return -EINVAL;
+    if (!wos->woe->presentation)
+        return -ENOTSUP;
+    wos->presentation_req = true;
+    return 0;
 }
 
 // Remove teh ref from the surface to the window
@@ -1261,6 +1351,22 @@ static const struct zwp_linux_dmabuf_v1_listener linux_dmabuf_v1_listener = {
 // ---------------------------------------------------------------------------
 
 static void
+presentation_clock_id(void *data,
+                      struct wp_presentation * presentation,
+                      uint32_t clock_id)
+{
+    wo_env_t *const woe = data;
+    (void)presentation;
+    woe->presentation_clock_id = (int)clock_id;
+}
+
+static const struct wp_presentation_listener presentation_listener = {
+    .clock_id = presentation_clock_id,
+};
+
+// ---------------------------------------------------------------------------
+
+static void
 global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
                                     const char *interface, uint32_t version)
 {
@@ -1293,6 +1399,10 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
         woe->single_pixel_manager = wl_registry_bind(registry, id, &wp_single_pixel_buffer_manager_v1_interface, 1);
     if (strcmp(interface, wl_subcompositor_interface.name) == 0)
         woe->subcompositor = wl_registry_bind(registry, id, &wl_subcompositor_interface, 1);
+    if (strcmp(interface, wp_presentation_interface.name) == 0) {
+        woe->presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 1);
+        wp_presentation_add_listener(woe->presentation, &presentation_listener, woe);
+    }
 }
 
 static void
@@ -1469,6 +1579,8 @@ pollq_exit(void * v)
         xdg_wm_base_destroy(woe->wm_base);
     if (woe->decoration_manager)
         zxdg_decoration_manager_v1_destroy(woe->decoration_manager);
+    if (woe->presentation)
+        wp_presentation_destroy(woe->presentation);
     if (woe->viewporter)
         wp_viewporter_destroy(woe->viewporter);
     if (woe->linux_dmabuf_v1)

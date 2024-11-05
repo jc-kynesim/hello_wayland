@@ -61,6 +61,17 @@ typedef struct wo_surface_fns_s {
     wo_surface_window_resize_fn resize_fn;
 } wo_surface_fns_t;
 
+typedef struct wo_surface_stats_s {
+    unsigned int presented_count;
+    unsigned int discarded_count;
+} wo_surface_stats_t;
+
+// Retrieve stats
+const wo_surface_stats_t * wo_surface_stats_get(wo_surface_t * const wos);
+// Enable stats for this surface. There is a small overhead so only enable
+// if actually wanted
+int wo_surface_stats_enable(wo_surface_t * const wos);
+
 wo_surface_t * wo_make_surface_z(wo_window_t * wowin, const wo_surface_fns_t * fns, unsigned int zpos);
 void wo_surface_unref(wo_surface_t ** ppWs);
 wo_surface_t * wo_surface_ref(wo_surface_t * const wos);

@@ -910,6 +910,10 @@ vidout_wayland_delete(vid_out_env_t *vc)
     pollqueue_finish(&vc->vid_pq);
 
     wo_surface_detach_fb(vc->vid);
+    {
+        const wo_surface_stats_t * const stats = wo_surface_stats_get(vc->vid);
+        LOG("Video: wayland presented %u, discarded %u\n", stats->presented_count, stats->discarded_count);
+    }
 
     wo_surface_unref(&vc->vid);
     wo_window_unref(&vc->win);
@@ -971,6 +975,7 @@ wayland_out_new(const bool is_egl, const unsigned int flags)
     }
     ve->win_rect = wo_window_size(ve->win);
     wo_surface_dst_pos_set(ve->vid, ve->win_rect);
+    wo_surface_stats_enable(ve->vid);
 
     if (!ve->is_egl)
         wo_surface_on_win_resize_set(ve->vid, vid_resize_dmabuf_cb, ve);

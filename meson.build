@@ -38,6 +38,7 @@ protocol_defs = [
      'linux-dmabuf-unstable-v1-protocol.c', 'linux-dmabuf-unstable-v1-client-protocol.h'],
     ['/unstable/fullscreen-shell/fullscreen-shell-unstable-v1.xml',
      'fullscreen-shell-unstable-v1-protocol.c', 'fullscreen-shell-unstable-v1-client-protocol.h'],
+    ['/stable/presentation-time/presentation-time.xml', 'presentation-time-protocol.c', 'presentation-time-client-protocol.h'],
 	['/staging/single-pixel-buffer/single-pixel-buffer-v1.xml', 'single-pixel-buffer-v1-client-protocol.c', 'single-pixel-buffer-v1-client-protocol.h'],
     ['/stable/xdg-shell/xdg-shell.xml', 'xdg-shell-protocol.c', 'xdg-shell-client-protocol.h'],
     ['/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml', 'xdg-decoration-unstable-v1-protocol.c', 'xdg-decoration-unstable-v1-client-protocol.h'],
