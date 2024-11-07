@@ -60,6 +60,7 @@ static AVFilterContext *buffersrc_ctx = NULL;
 static AVFilterGraph *filter_graph = NULL;
 
 static AVDictionary *codec_opts = NULL;
+static long ffdebug_level = -1L;
 
 static int64_t
 time_us()
@@ -343,6 +344,19 @@ end:
     return ret;
 }
 
+static void log_callback_help(void *ptr, int level, const char *fmt, va_list vl)
+{
+    (void)ptr;
+    if (level <= ffdebug_level * 8) {
+        static uint64_t t0 = 0;
+        uint64_t now = time_us();
+        if (t0 == 0)
+            t0 = now;
+        printf("%4"PRId64".%04d: [%d] ", (now - t0)/1000000, (unsigned int)((now - t0) % 1000000) / 1000, level / 8);
+        vfprintf(stdout, fmt, vl);
+    }
+}
+
 void usage()
 {
     fprintf(stderr,
@@ -459,6 +473,15 @@ int main(int argc, char *argv[])
             else if (strcmp(arg, "--deinterlace") == 0) {
                 wants_deinterlace = true;
             }
+            else if (strcmp(arg, "--ffdebug") == 0) {
+                if (n == 0)
+                    usage();
+                ffdebug_level = strtol(*a, &e, 0);
+                if (*e != 0)
+                    usage();
+                --n;
+                ++a;
+            }
 #if HAS_RUNCUBE
             else if (strcmp(arg, "--cube") == 0) {
                 wants_cube = true;
@@ -493,6 +516,9 @@ int main(int argc, char *argv[])
         if (loop_count > 0)
             loop_count *= in_count;
     }
+
+    if (ffdebug_level >= 0)
+        av_log_set_callback(log_callback_help);
 
     type = av_hwdevice_find_type_by_name(hwdev);
     if (type == AV_HWDEVICE_TYPE_NONE) {
