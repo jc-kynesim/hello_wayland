@@ -132,6 +132,7 @@ display_wait(const AVFrame * const frame, const AVRational time_base)
     if (delta < 0 || delta > 6000000) {
         base_pts = pts;
         base_now = now;
+        last_conv = 0;
         return;
     }
 
