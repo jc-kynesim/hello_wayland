@@ -405,6 +405,7 @@ int main(int argc, char *argv[])
     long frame_count = -1;
     const char * out_name = NULL;
     bool wants_deinterlace = false;
+    bool low_delay = false;
     long pace_input_hz = 0;
     bool try_hw = true;
     bool use_dmabuf = true;
@@ -482,6 +483,9 @@ int main(int argc, char *argv[])
                     usage();
                 --n;
                 ++a;
+            }
+            else if (strcmp(arg, "--low-delay") == 0) {
+                low_delay = true;
             }
 #if HAS_RUNCUBE
             else if (strcmp(arg, "--cube") == 0) {
@@ -638,7 +642,7 @@ retry_hw:
         decoder_ctx->opaque = dpo;
         decoder_ctx->thread_count = 0; // FFmpeg will pick a default
     }
-    decoder_ctx->flags = 0;
+    decoder_ctx->flags = low_delay ? AV_CODEC_FLAG_LOW_DELAY : 0;
     // Pick any threading method
     decoder_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
