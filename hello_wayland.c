@@ -60,7 +60,7 @@ static AVFilterContext *buffersrc_ctx = NULL;
 static AVFilterGraph *filter_graph = NULL;
 
 static AVDictionary *codec_opts = NULL;
-static long ffdebug_level = -1L;
+static int ffdebug_level = -1L;
 
 static int64_t
 time_us()
@@ -358,12 +358,51 @@ static void log_callback_help(void *ptr, int level, const char *fmt, va_list vl)
     }
 }
 
+struct log_xlat_ss {
+    int lvl;
+    const char * name;
+} log_xlat[] =
+{
+    {AV_LOG_QUIET,   "QUIET"},
+    {AV_LOG_PANIC,   "PANIC"},
+    {AV_LOG_FATAL,   "FATAL"},
+    {AV_LOG_ERROR,   "ERROR"},
+    {AV_LOG_WARNING, "WARNING"},
+    {AV_LOG_INFO,    "INFO"},
+    {AV_LOG_VERBOSE, "VERBOSE"},
+    {AV_LOG_DEBUG,   "DEBUG"},
+    {AV_LOG_TRACE,   "TRACE"},
+    {0, NULL}
+};
+
+int strtologlvl(const char * s)
+{
+    size_t slen = strlen(s);
+    long lvl;
+    char * p;
+
+    if (slen == 0)
+        return -99;
+
+    for (int i = 0; log_xlat[i].name != NULL; ++i) {
+        if (strncasecmp(s, log_xlat[i].name, slen) == 0)
+            return log_xlat[i].lvl;
+    }
+
+    lvl = strtol(s, &p, 0);
+    if (*p == 0)
+        return (int)(lvl * 8);
+
+    return -99;
+}
+
 void usage()
 {
     fprintf(stderr,
             "Usage: hello_wayland [-e]\n"
             "                     [-l <loop_count>] [-f <frames>] [-o <yuv_output_file>]\n"
             "                     [--deinterlace] [--pace-input <hz>] [--fullscreen]\n"
+            "                     [-O <codec opts>] [--ffdebug <debug level>] [--low-delay]\n"
             "                     "
 #if HAS_RUNTICKER
             "[--ticker <text>] "
@@ -478,8 +517,8 @@ int main(int argc, char *argv[])
             else if (strcmp(arg, "--ffdebug") == 0) {
                 if (n == 0)
                     usage();
-                ffdebug_level = strtol(*a, &e, 0);
-                if (*e != 0)
+                ffdebug_level = strtologlvl(*a);
+                if (ffdebug_level <= -99)
                     usage();
                 --n;
                 ++a;
