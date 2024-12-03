@@ -511,7 +511,9 @@ int main(int argc, char *argv[])
                 --n;
                 ++a;
             }
-            else if (strcmp(arg, "--deinterlace") == 0) {
+            else if (strcmp(arg, "--sw") == 0) {
+                try_hw = false;
+            } else if (strcmp(arg, "--deinterlace") == 0) {
                 wants_deinterlace = true;
             }
             else if (strcmp(arg, "--ffdebug") == 0) {
