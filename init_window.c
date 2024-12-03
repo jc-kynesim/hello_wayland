@@ -778,10 +778,14 @@ sw_dmabuf_make(struct AVCodecContext * const avctx, vid_out_env_t * const vc, co
     for (planes = 0; planes != 4 && size[planes] != 0; ++planes)
         total_size += size[planes];
 
-    if ((swd->dh = dmabuf_pool_fb_new(vc->dpool, total_size)) == NULL) {
-        fprintf(stderr, "dmabuf_alloc failed\n");
-        goto fail;
+    for (i = 0; i != 20; ++i) {
+        if ((swd->dh = dmabuf_pool_fb_new(vc->dpool, total_size)) != NULL)
+            break;
+        fprintf(stderr, "dmabuf_alloc fail #%d\n", i);
+        usleep(10000);  // **** Kludge
     }
+    if (i >= 20)
+        goto fail;
 
     swd->desc.nb_objects = 1;
     swd->desc.objects[0].fd = dmabuf_fd(swd->dh);
