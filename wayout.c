@@ -28,6 +28,7 @@
 #include "single-pixel-buffer-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "color-representation-v1-client-protocol.h"
 
 #define LOG printf
 
@@ -144,6 +145,8 @@ struct wo_env_s {
     struct xdg_wm_base *wm_base;
     struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
     struct wp_presentation *presentation;
+    struct wp_color_representation_manager_v1 *color_representation;
+
     // Presentation clock id (CLOCK_xxx)
     int presentation_clock_id;
     // Dmabuf fmts
@@ -1403,6 +1406,8 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
         woe->presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 1);
         wp_presentation_add_listener(woe->presentation, &presentation_listener, woe);
     }
+    if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0)
+        woe->color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
 }
 
 static void
@@ -1587,6 +1592,8 @@ pollq_exit(void * v)
         zwp_linux_dmabuf_v1_destroy(woe->linux_dmabuf_v1);
     if (woe->single_pixel_manager)
         wp_single_pixel_buffer_manager_v1_destroy(woe->single_pixel_manager);
+    if (woe->color_representation)
+        wp_color_representation_manager_v1_destroy(woe->color_representation);
     if (woe->subcompositor)
         wl_subcompositor_destroy(woe->subcompositor);
     if (woe->compositor)

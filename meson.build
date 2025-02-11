@@ -42,19 +42,23 @@ protocol_defs = [
 	['/staging/single-pixel-buffer/single-pixel-buffer-v1.xml', 'single-pixel-buffer-v1-client-protocol.c', 'single-pixel-buffer-v1-client-protocol.h'],
     ['/stable/xdg-shell/xdg-shell.xml', 'xdg-shell-protocol.c', 'xdg-shell-client-protocol.h'],
     ['/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml', 'xdg-decoration-unstable-v1-protocol.c', 'xdg-decoration-unstable-v1-client-protocol.h'],
+    ['protocols/color-representation-v1.xml', 'color-representation-v1-protocol.c', 'color-representation-v1-client-protocol.h'],
 ]
 protocols_files = []
 
 foreach protodef: protocol_defs
-    xmlfile = protocols_datadir + protodef.get(0)
+    xmlfile = protodef[0]
+    if xmlfile.startswith('/')
+        xmlfile = protocols_datadir + xmlfile
+    endif
 
-    protocols_files += [custom_target(protodef.get(1),
-      output : protodef.get(1),
+    protocols_files += [custom_target(protodef[1],
+      output : protodef[1],
       input : xmlfile,
       command : [wl_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])]
 
-    protocols_files += [custom_target(protodef.get(2),
-      output : protodef.get(2),
+    protocols_files += [custom_target(protodef[2],
+      output : protodef[2],
       input : xmlfile,
       command : [wl_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])]
 endforeach
