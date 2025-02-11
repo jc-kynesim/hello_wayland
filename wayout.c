@@ -1367,6 +1367,91 @@ static const struct wp_presentation_listener presentation_listener = {
     .clock_id = presentation_clock_id,
 };
 
+/**
+ * supported alpha modes
+ *
+ * This event advertises alpha modes that the server supports.
+ * The value represents one alpha mode.
+ *
+ * All the supported values are advertised once when the client
+ * binds to this interface. A roundtrip after binding guarantees
+ * that the client has received all supported values.
+ *
+ * For the definition of the supported values, see the
+ * wp_color_representation_v1::alpha_mode enum.
+ * @param alpha_mode supported alpha mode
+ */
+static void
+wo_color_representation_supported_alpha_mode_cb(void *data,
+                 struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
+                 uint32_t alpha_mode)
+{
+    (void)data;
+    (void)wp_color_representation_manager_v1;
+    (void)alpha_mode;
+}
+
+/**
+ * supported matrix coefficients and ranges
+ *
+ * This event advertises matrix coefficients the server supports
+ * in combination with a color range. The values usually correspond
+ * to H.273 MatrixCoefficients code points that define a formula
+ * and the related constants used to derive red, green and blue
+ * signals.
+ *
+ * All the supported values are advertised once when the client
+ * binds to this interface. A roundtrip after binding guarantees
+ * that the client has received all supported values.
+ *
+ * For the definition of the supported values, see the
+ * wp_color_representation_v1::coefficients and
+ * wp_color_representation_v1::range enums.
+ * @param coefficients supported matrix coefficients
+ * @param range full range flag
+ */
+static void
+wo_color_representation_supported_coefficients_and_ranges_cb(void *data,
+                      struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
+                      uint32_t coefficients,
+                      uint32_t range)
+{
+    (void)data;
+    (void)wp_color_representation_manager_v1;
+    (void)coefficients;
+    (void)range;
+}
+
+/**
+ * supported chroma location types
+ *
+ * This event advertises chroma location types that the server
+ * supports for subsampling. The value represents one chroma
+ * location type.
+ *
+ * All the supported types are advertised once when the client
+ * binds to this interface. A roundtrip after binding guarantees
+ * that the client has received all supported code points.
+ *
+ * For the definition of the types, see the
+ * wp_color_representation_v1::chroma_location enum.
+ * @param chroma_location supported chroma location type
+ */
+static void wo_color_representation_supported_chroma_location_cb(void *data,
+                  struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
+                  uint32_t chroma_location)
+{
+    (void)data;
+    (void)wp_color_representation_manager_v1;
+    (void)chroma_location;
+}
+
+static const struct wp_color_representation_manager_v1_listener color_representation_manager_listener = {
+	.supported_alpha_mode = wo_color_representation_supported_alpha_mode_cb,
+	.supported_coefficients_and_ranges = wo_color_representation_supported_coefficients_and_ranges_cb,
+	.supported_chroma_location = wo_color_representation_supported_chroma_location_cb,
+};
+
 // ---------------------------------------------------------------------------
 
 static void
@@ -1406,8 +1491,10 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
         woe->presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 1);
         wp_presentation_add_listener(woe->presentation, &presentation_listener, woe);
     }
-    if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0)
+    if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
         woe->color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
+        wp_color_representation_manager_v1_add_listener(woe->color_representation, &color_representation_manager_listener, woe);
+    }
 }
 
 static void
