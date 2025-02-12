@@ -66,6 +66,11 @@ struct wo_fb_s {
     uint64_t mod;
     wo_rect_t crop;   // 16.16 fixed
 
+    int alpha_mode;
+    int color_coefficients;
+    bool color_range;
+    int chroma_location;
+
     struct wl_buffer *way_buf;
 
     wo_fb_on_delete_fn on_delete_fn;
@@ -146,6 +151,11 @@ struct wo_env_s {
     struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
     struct wp_presentation *presentation;
     struct wp_color_representation_manager_v1 *color_representation;
+
+    unsigned int alpha_support;
+    unsigned int coeff_support;
+    unsigned int range_support; // Indexed by coeff
+    unsigned int location_support;
 
     // Presentation clock id (CLOCK_xxx)
     int presentation_clock_id;
@@ -365,6 +375,11 @@ wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64
     wofb->width = width;
     wofb->height = height;
     wofb->plane_count = 1;
+
+    wofb->alpha_mode = -1;
+    wofb->color_coefficients = -1;
+    wofb->chroma_location = -1;
+
     wofb->stride[0] = width * 4;  // *** Proper fmt calc would be good!
     // Leave crop unset (0 => no crop)
     if ((wofb->dh[0] = dmabuf_alloc(woe->dbsc, height * wofb->stride[0])) == NULL)
@@ -646,6 +661,44 @@ void
 wo_fb_crop_frac_set(wo_fb_t * wfb, const wo_rect_t crop)
 {
     wfb->crop = crop;
+}
+
+int
+wo_fb_alpha_mode_set(wo_fb_t * wfb, int alpha_mode)
+{
+    if (alpha_mode < 0 || alpha_mode > 31 || !(wfb->woe->alpha_support & (1U << alpha_mode)))
+    {
+        wfb->alpha_mode = -1;
+        return -ENOTSUP;
+    }
+    wfb->alpha_mode = alpha_mode;
+    return 0;
+}
+
+int
+wo_fb_color_coeff_set(wo_fb_t * wfb, int coeff, bool reduced_range)
+{
+    if (coeff < 0 || coeff > 31 || !(wfb->woe->alpha_support & (1U << coeff)))
+    {
+        wfb->color_coefficients = -1;
+        wfb->color_range = 0;
+        return -ENOTSUP;
+    }
+    wfb->color_coefficients = coeff;
+    wfb->color_range = (reduced_range && (wfb->woe->range_support & (1U << coeff)));
+    return 0;
+}
+
+int
+wo_fb_chroma_pos_set(wo_fb_t * wfb, int pos)
+{
+    if (pos < 0 || pos > 31 || !(wfb->woe->location_support & (1U << pos)))
+    {
+        wfb->chroma_location = -1;
+        return -ENOTSUP;
+    }
+    wfb->chroma_location = pos;
+    return 0;
 }
 
 void
@@ -1386,9 +1439,16 @@ wo_color_representation_supported_alpha_mode_cb(void *data,
                  struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
                  uint32_t alpha_mode)
 {
-    (void)data;
+    wo_env_t *const woe = data;
+
     (void)wp_color_representation_manager_v1;
-    (void)alpha_mode;
+
+    if (alpha_mode > 32) {
+        LOG("%s: alpha_mode %d > 31\n", __func__, alpha_mode);
+        return;
+    }
+
+    woe->alpha_support = 1 << alpha_mode;
 }
 
 /**
@@ -1416,10 +1476,18 @@ wo_color_representation_supported_coefficients_and_ranges_cb(void *data,
                       uint32_t coefficients,
                       uint32_t range)
 {
-    (void)data;
+    wo_env_t *const woe = data;
+
     (void)wp_color_representation_manager_v1;
-    (void)coefficients;
-    (void)range;
+
+    if (coefficients > 32) {
+        LOG("%s: coefficient %d > 31\n", __func__, coefficients);
+        return;
+    }
+
+    woe->coeff_support = 1 << coefficients;
+    if (range)
+            woe->range_support = 1 << coefficients;
 }
 
 /**
@@ -1441,15 +1509,22 @@ static void wo_color_representation_supported_chroma_location_cb(void *data,
                   struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
                   uint32_t chroma_location)
 {
-    (void)data;
+    wo_env_t *const woe = data;
+
     (void)wp_color_representation_manager_v1;
-    (void)chroma_location;
+
+    if (chroma_location > 32) {
+        LOG("%s: chroma location %d > 31\n", __func__, chroma_location);
+        return;
+    }
+
+    woe->location_support = 1 << chroma_location;
 }
 
 static const struct wp_color_representation_manager_v1_listener color_representation_manager_listener = {
-	.supported_alpha_mode = wo_color_representation_supported_alpha_mode_cb,
-	.supported_coefficients_and_ranges = wo_color_representation_supported_coefficients_and_ranges_cb,
-	.supported_chroma_location = wo_color_representation_supported_chroma_location_cb,
+    .supported_alpha_mode = wo_color_representation_supported_alpha_mode_cb,
+    .supported_coefficients_and_ranges = wo_color_representation_supported_coefficients_and_ranges_cb,
+    .supported_chroma_location = wo_color_representation_supported_chroma_location_cb,
 };
 
 // ---------------------------------------------------------------------------
