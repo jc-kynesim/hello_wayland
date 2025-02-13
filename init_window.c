@@ -25,6 +25,8 @@
 #include <libavutil/hwcontext_drm.h>
 #include <libavutil/imgutils.h>
 
+#include "color-representation-v1-client-protocol.h"
+
 // Local headers
 #include "dmabuf_alloc.h"
 #include "dmabuf_pool.h"
@@ -321,6 +323,43 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
     if (wofb == NULL) {
         LOG("Failed to create dmabuf\n");
         return;
+    }
+
+    {
+        // I think this is in fact simply (chroma_location - 1) but use the full enum
+        static const int xlat[7] = {
+            [AVCHROMA_LOC_UNSPECIFIED] = -1,
+            [AVCHROMA_LOC_LEFT       ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_0,
+            [AVCHROMA_LOC_CENTER     ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_1,
+            [AVCHROMA_LOC_TOPLEFT    ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_2,
+            [AVCHROMA_LOC_TOP        ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_3,
+            [AVCHROMA_LOC_BOTTOMLEFT ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_4,
+            [AVCHROMA_LOC_BOTTOM     ] = WP_COLOR_REPRESENTATION_V1_CHROMA_LOCATION_TYPE_5
+        };
+        wo_fb_chroma_pos_set(wofb, frame->chroma_location < 0 || frame->chroma_location > 6 ? -1 :
+                             xlat[frame->chroma_location]);
+    }
+    {
+        static const int xlat[15] = {
+            [AVCOL_SPC_RGB        ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_IDENTITY,  ///< order of coefficients is actually GBR, also IEC 61966-2-1 (sRGB), YZX and ST 428-1
+            [AVCOL_SPC_BT709      ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_BT709,  ///< also ITU-R BT1361 / IEC 61966-2-4 xvYCC709 / derived in SMPTE RP 177 Annex B
+            [AVCOL_SPC_UNSPECIFIED] = -1,
+            [AVCOL_SPC_RESERVED   ] = -1,  ///< reserved for future use by ITU-T and ISO/IEC just like 15-255 are
+            [AVCOL_SPC_FCC        ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_FCC,  ///< FCC Title 47 Code of Federal Regulations 73.682 (a)(20)
+            [AVCOL_SPC_BT470BG    ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_BT601,  ///< also ITU-R BT601-6 625 / ITU-R BT1358 625 / ITU-R BT1700 625 PAL & SECAM / IEC 61966-2-4 xvYCC601
+            [AVCOL_SPC_SMPTE170M  ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_BT601,  ///< also ITU-R BT601-6 525 / ITU-R BT1358 525 / ITU-R BT1700 NTSC / functionally identical to above
+            [AVCOL_SPC_SMPTE240M  ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_SMPTE240,  ///< derived from 170M primaries and D65 white point, 170M is derived from BT470 System M's primaries
+            [AVCOL_SPC_YCGCO      ] = -1,  ///< used by Dirac / VC-2 and H.264 FRext, see ITU-T SG16
+            [AVCOL_SPC_BT2020_NCL ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_BT2020,  ///< ITU-R BT2020 non-constant luminance system
+            [AVCOL_SPC_BT2020_CL  ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_BT2020_CL, ///< ITU-R BT2020 constant luminance system
+            [AVCOL_SPC_SMPTE2085  ] = -1, ///< SMPTE 2085, Y'D'zD'x
+            [AVCOL_SPC_CHROMA_DERIVED_NCL] = -1, ///< Chromaticity-derived non-constant luminance system
+            [AVCOL_SPC_CHROMA_DERIVED_CL] = -1, ///< Chromaticity-derived constant luminance system
+            [AVCOL_SPC_ICTCP      ] = WP_COLOR_REPRESENTATION_V1_COEFFICIENTS_ICTCP, ///< ITU-R BT.2100-0, ICtCp
+        };
+        wo_fb_color_coeff_set(wofb, frame->colorspace < 0 || frame->colorspace >= 15 ? -1 :
+                                xlat[frame->colorspace],
+                              (frame->color_range == AVCOL_RANGE_MPEG));
     }
 
     // **** Maybe better to attach buf delete to wofb delete?

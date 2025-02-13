@@ -47,6 +47,7 @@ typedef struct subplane_s {
     struct wl_surface * surface;
     struct wl_subsurface * subsurface;
     struct wp_viewport * viewport;
+    struct wp_color_representation_v1 * color;
 } subplane_t;
 
 #define WO_FB_PLANES 4
@@ -288,6 +289,16 @@ buffer_destroy(struct wl_buffer ** ppbuffer)
 }
 
 static void
+color_representation_destroy(struct wp_color_representation_v1 ** ppcolor)
+{
+    struct wp_color_representation_v1 * color = *ppcolor;
+    if (color == NULL)
+        return;
+    *ppcolor = NULL;
+    wp_color_representation_v1_destroy(color);
+}
+
+static void
 region_destroy(struct wl_region ** const ppregion)
 {
     if (*ppregion == NULL)
@@ -328,6 +339,7 @@ plane_destroy(subplane_t * const spl)
 {
     viewport_destroy(&spl->viewport);
     subsurface_destroy(&spl->subsurface);
+    color_representation_destroy(&spl->color);
     surface_destroy(&spl->surface);
 }
 
@@ -870,6 +882,21 @@ surface_attach_fb_cb(void * v, short revents)
                 wos->src_pos = wofb->crop;
                 commit_req_this = true;
             }
+        }
+        if (wos->woe->color_representation != NULL && wofb != NULL &&
+            (wofb->alpha_mode != -1 || wofb->chroma_location != -1 || wofb->color_coefficients != -1)) {
+            if (wos->s.color == NULL) {
+                wos->s.color = wp_color_representation_manager_v1_create(wos->woe->color_representation, wos->s.surface);
+            }
+            if (wofb->alpha_mode != -1)
+                wp_color_representation_v1_set_alpha_mode(wos->s.color, wofb->alpha_mode);
+            if (wofb->chroma_location != -1)
+                wp_color_representation_v1_set_chroma_location(wos->s.color, wofb->chroma_location);
+            if (wofb->color_coefficients != -1)
+                wp_color_representation_v1_set_coefficients_and_range(wos->s.color, wofb->color_coefficients, wofb->color_range);
+        }
+        else {
+            color_representation_destroy(&wos->s.color);
         }
         if (use_dst) {
             if (wos->dst_pos.w != a->dst_pos.w || wos->dst_pos.h != a->dst_pos.h) {

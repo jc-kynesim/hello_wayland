@@ -104,6 +104,10 @@ void * wo_fb_data(const wo_fb_t * wfb, const unsigned int plane);
 // crop is expected to be in 16.16 fixed point format
 void wo_fb_crop_frac_set(wo_fb_t * wfb, const wo_rect_t crop);
 
+int wo_fb_alpha_mode_set(wo_fb_t * wfb, int alpha_mode);
+int wo_fb_color_coeff_set(wo_fb_t * wfb, int coeff, bool reduced_range);
+int wo_fb_chroma_pos_set(wo_fb_t * wfb, int pos);
+
 void wo_fb_write_start(wo_fb_t * wfb);
 void wo_fb_write_end(wo_fb_t * wfb);
 void wo_fb_read_start(wo_fb_t * wfb);
