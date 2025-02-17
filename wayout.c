@@ -372,10 +372,24 @@ fail:
 }
 
 // ===========================================================================
+
+static wo_fb_t *
+wofb_new()
+{
+    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    if (wofb == NULL)
+        return NULL;
+
+    wofb->alpha_mode = -1;
+    wofb->color_coefficients = -1;
+    wofb->chroma_location = -1;
+    return wofb;
+}
+
 wo_fb_t *
 wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
 {
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
     struct zwp_linux_buffer_params_v1 *params;
     unsigned int i;
 
@@ -387,10 +401,6 @@ wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64
     wofb->width = width;
     wofb->height = height;
     wofb->plane_count = 1;
-
-    wofb->alpha_mode = -1;
-    wofb->color_coefficients = -1;
-    wofb->chroma_location = -1;
 
     wofb->stride[0] = width * 4;  // *** Proper fmt calc would be good!
     // Leave crop unset (0 => no crop)
@@ -426,7 +436,7 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
              unsigned int planes, const size_t * offsets, const size_t * strides, const unsigned int * obj_nos)
 {
     struct zwp_linux_buffer_params_v1 *params;
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
     unsigned int i;
 
     if (wofb == NULL)
