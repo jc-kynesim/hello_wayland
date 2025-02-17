@@ -690,7 +690,7 @@ wo_fb_alpha_mode_set(wo_fb_t * wfb, int alpha_mode)
 int
 wo_fb_color_coeff_set(wo_fb_t * wfb, int coeff, bool reduced_range)
 {
-    if (coeff < 0 || coeff > 31 || !(wfb->woe->alpha_support & (1U << coeff)))
+    if (coeff < 0 || coeff > 31 || !(wfb->woe->coeff_support & (1U << coeff)))
     {
         wfb->color_coefficients = -1;
         wfb->color_range = 0;
