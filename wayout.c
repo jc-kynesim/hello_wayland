@@ -1485,7 +1485,7 @@ wo_color_representation_supported_alpha_mode_cb(void *data,
         return;
     }
 
-    woe->alpha_support = 1 << alpha_mode;
+    woe->alpha_support |= 1 << alpha_mode;
 }
 
 /**
@@ -1522,9 +1522,9 @@ wo_color_representation_supported_coefficients_and_ranges_cb(void *data,
         return;
     }
 
-    woe->coeff_support = 1 << coefficients;
+    woe->coeff_support |= 1 << coefficients;
     if (range)
-            woe->range_support = 1 << coefficients;
+            woe->range_support |= 1 << coefficients;
 }
 
 /**
@@ -1555,7 +1555,7 @@ static void wo_color_representation_supported_chroma_location_cb(void *data,
         return;
     }
 
-    woe->location_support = 1 << chroma_location;
+    woe->location_support |= 1 << chroma_location;
 }
 
 static const struct wp_color_representation_manager_v1_listener color_representation_manager_listener = {
