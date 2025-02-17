@@ -856,7 +856,7 @@ surface_attach_fb_cb(void * v, short revents)
             fb_on_release_setup(wofb);
             commit_req_this = true;
 
-            if (wos->presentation_req || 1) {
+            if (wos->presentation_req) {
                 struct wp_presentation_feedback * feedback =
                     wp_presentation_feedback(wos->woe->presentation, wos->s.surface);
                 wp_presentation_feedback_add_listener(feedback, &presentation_feedback_listener, wo_surface_ref(wos));
