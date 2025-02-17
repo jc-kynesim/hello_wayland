@@ -840,12 +840,12 @@ surface_attach_fb_cb(void * v, short revents)
     wos->commit0_done = true;
 
     if (a->detach) {
-//        if (wos->wofb != NULL) {
+        if (wos->wofb_weak != NULL) {
             wl_surface_attach(wos->s.surface, NULL, 0, 0);
             wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
             wos->wofb_weak = NULL;
             commit_req_this = true;
-//        }
+        }
     }
     else {
         const bool use_dst = (a->dst_pos.w != 0 && a->dst_pos.h != 0);
