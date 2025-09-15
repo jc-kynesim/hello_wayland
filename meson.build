@@ -42,7 +42,7 @@ protocol_defs = [
 	['/staging/single-pixel-buffer/single-pixel-buffer-v1.xml', 'single-pixel-buffer-v1-client-protocol.c', 'single-pixel-buffer-v1-client-protocol.h'],
     ['/stable/xdg-shell/xdg-shell.xml', 'xdg-shell-protocol.c', 'xdg-shell-client-protocol.h'],
     ['/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml', 'xdg-decoration-unstable-v1-protocol.c', 'xdg-decoration-unstable-v1-client-protocol.h'],
-    ['protocols/color-representation-v1.xml', 'color-representation-v1-protocol.c', 'color-representation-v1-client-protocol.h'],
+    ['/staging/color-representation/color-representation-v1.xml', 'color-representation-v1-protocol.c', 'color-representation-v1-client-protocol.h'],
 ]
 protocols_files = []
 

@@ -47,7 +47,7 @@ typedef struct subplane_s {
     struct wl_surface * surface;
     struct wl_subsurface * subsurface;
     struct wp_viewport * viewport;
-    struct wp_color_representation_v1 * color;
+    struct wp_color_representation_surface_v1 * color;
 } subplane_t;
 
 #define WO_FB_PLANES 4
@@ -156,7 +156,6 @@ struct wo_env_s {
     unsigned int alpha_support;
     unsigned int coeff_support;
     unsigned int range_support; // Indexed by coeff
-    unsigned int location_support;
 
     // Presentation clock id (CLOCK_xxx)
     int presentation_clock_id;
@@ -289,13 +288,13 @@ buffer_destroy(struct wl_buffer ** ppbuffer)
 }
 
 static void
-color_representation_destroy(struct wp_color_representation_v1 ** ppcolor)
+color_representation_destroy(struct wp_color_representation_surface_v1 ** ppcolor)
 {
-    struct wp_color_representation_v1 * color = *ppcolor;
+    struct wp_color_representation_surface_v1 * color = *ppcolor;
     if (color == NULL)
         return;
     *ppcolor = NULL;
-    wp_color_representation_v1_destroy(color);
+    wp_color_representation_surface_v1_destroy(color);
 }
 
 static void
@@ -480,7 +479,7 @@ fail:
 wo_fb_t *
 wo_fb_new_rgba_pixel(wo_env_t * const woe, const uint32_t r, const uint32_t g, const uint32_t b, const uint32_t a)
 {
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
 
     if (wofb == NULL)
         return NULL;
@@ -714,7 +713,7 @@ wo_fb_color_coeff_set(wo_fb_t * wfb, int coeff, bool reduced_range)
 int
 wo_fb_chroma_pos_set(wo_fb_t * wfb, int pos)
 {
-    if (pos < 0 || pos > 31 || !(wfb->woe->location_support & (1U << pos)))
+    if (pos < 0 || pos > 31)
     {
         wfb->chroma_location = -1;
         return -ENOTSUP;
@@ -896,14 +895,14 @@ surface_attach_fb_cb(void * v, short revents)
         if (wos->woe->color_representation != NULL && wofb != NULL &&
             (wofb->alpha_mode != -1 || wofb->chroma_location != -1 || wofb->color_coefficients != -1)) {
             if (wos->s.color == NULL) {
-                wos->s.color = wp_color_representation_manager_v1_create(wos->woe->color_representation, wos->s.surface);
+                wos->s.color = wp_color_representation_manager_v1_get_surface(wos->woe->color_representation, wos->s.surface);
             }
             if (wofb->alpha_mode != -1)
-                wp_color_representation_v1_set_alpha_mode(wos->s.color, wofb->alpha_mode);
+                wp_color_representation_surface_v1_set_alpha_mode(wos->s.color, wofb->alpha_mode);
             if (wofb->chroma_location != -1)
-                wp_color_representation_v1_set_chroma_location(wos->s.color, wofb->chroma_location);
+                wp_color_representation_surface_v1_set_chroma_location(wos->s.color, wofb->chroma_location);
             if (wofb->color_coefficients != -1)
-                wp_color_representation_v1_set_coefficients_and_range(wos->s.color, wofb->color_coefficients, wofb->color_range);
+                wp_color_representation_surface_v1_set_coefficients_and_range(wos->s.color, wofb->color_coefficients, wofb->color_range);
         }
         else {
             color_representation_destroy(&wos->s.color);
@@ -1468,7 +1467,7 @@ static const struct wp_presentation_listener presentation_listener = {
  * that the client has received all supported values.
  *
  * For the definition of the supported values, see the
- * wp_color_representation_v1::alpha_mode enum.
+ * wp_color_representation_surface_v1::alpha_mode enum.
  * @param alpha_mode supported alpha mode
  */
 static void
@@ -1502,8 +1501,8 @@ wo_color_representation_supported_alpha_mode_cb(void *data,
  * that the client has received all supported values.
  *
  * For the definition of the supported values, see the
- * wp_color_representation_v1::coefficients and
- * wp_color_representation_v1::range enums.
+ * wp_color_representation_surface_v1::coefficients and
+ * wp_color_representation_surface_v1::range enums.
  * @param coefficients supported matrix coefficients
  * @param range full range flag
  */
@@ -1527,41 +1526,18 @@ wo_color_representation_supported_coefficients_and_ranges_cb(void *data,
             woe->range_support |= 1 << coefficients;
 }
 
-/**
- * supported chroma location types
- *
- * This event advertises chroma location types that the server
- * supports for subsampling. The value represents one chroma
- * location type.
- *
- * All the supported types are advertised once when the client
- * binds to this interface. A roundtrip after binding guarantees
- * that the client has received all supported code points.
- *
- * For the definition of the types, see the
- * wp_color_representation_v1::chroma_location enum.
- * @param chroma_location supported chroma location type
- */
-static void wo_color_representation_supported_chroma_location_cb(void *data,
-                  struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
-                  uint32_t chroma_location)
+static void wo_color_representation_done_cb(void *data,
+		     struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1)
 {
-    wo_env_t *const woe = data;
-
+    (void)data;
     (void)wp_color_representation_manager_v1;
-
-    if (chroma_location > 32) {
-        LOG("%s: chroma location %d > 31\n", __func__, chroma_location);
-        return;
-    }
-
-    woe->location_support |= 1 << chroma_location;
+    return;
 }
 
 static const struct wp_color_representation_manager_v1_listener color_representation_manager_listener = {
     .supported_alpha_mode = wo_color_representation_supported_alpha_mode_cb,
     .supported_coefficients_and_ranges = wo_color_representation_supported_coefficients_and_ranges_cb,
-    .supported_chroma_location = wo_color_representation_supported_chroma_location_cb,
+    .done = wo_color_representation_done_cb,
 };
 
 // ---------------------------------------------------------------------------
