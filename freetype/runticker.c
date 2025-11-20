@@ -41,7 +41,8 @@ do_prod(void *v)
 {
     static const uint64_t one = 1;
     runticker_env_t *const dfte = v;
-    write(dfte->prod_fd, &one, sizeof(one));
+    while (write(dfte->prod_fd, &one, sizeof(one)) == -1 && errno == EINTR)
+        /* Loop */;
 }
 
 static void *
