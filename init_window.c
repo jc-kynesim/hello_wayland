@@ -74,6 +74,8 @@ typedef struct vid_out_env_s {
     struct dmabufs_ctl * dbsc;
     dmabuf_pool_t * dpool;
 
+    atomic_int in_flight;
+
 #if HAS_RUNCUBE
     runcube_env_t * rce;
 #endif
@@ -260,14 +262,43 @@ set_vid_par(vid_out_env_t * const ve, const AVFrame * const frame)
     ve->vid_par_num = par_num;
 }
 
+typedef struct w_buf_env_s {
+    AVBufferRef *buf;
+    vid_out_env_t * ve;
+} w_buf_env_t;
+
+static w_buf_env_t *
+w_buf_alloc(vid_out_env_t * ve, AVBufferRef *buf)
+{
+    if (atomic_fetch_add(&ve->in_flight, 1) < 8) {
+        w_buf_env_t *wbe = malloc(sizeof(*wbe));
+        if (wbe == NULL)
+            return NULL;
+        wbe->buf = av_buffer_ref(buf);
+        wbe->ve = ve;
+        return wbe;
+    }
+    else
+    {
+        atomic_fetch_sub(&ve->in_flight, 1);
+        return NULL;
+    }
+}
+
+static void
+w_buf_free(w_buf_env_t * wbe)
+{
+    av_buffer_unref(&wbe->buf);
+    assert(atomic_fetch_sub(&wbe->ve->in_flight, 1) > 0);
+    free(wbe);
+}
+
 static void
 w_buffer_release(void *data, wo_fb_t *wofb)
 {
-    AVBufferRef *buf = data;
-
     // Sent by the compositor when it's no longer using this buffer
     wo_fb_unref(&wofb);
-    av_buffer_unref(&buf);
+    w_buf_free(data);
 }
 
 static void
@@ -283,6 +314,7 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
     unsigned int n = 0;
     const uint64_t mod = desc->objects[0].format_modifier;
     int i;
+    w_buf_env_t * wbe;
 
 #if TRACE_ALL
     LOG("<<< %s\n", __func__);
@@ -290,6 +322,12 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
 
     if (!wo_surface_dmabuf_fmt_check(ve->vid, format, mod)) {
         LOG("No support for format %s mod %#"PRIx64"\n", av_fourcc2str(format), mod);
+        return;
+    }
+
+    wbe = w_buf_alloc(ve, frame->buf[0]);
+    if (wbe == NULL) {
+        LOG("Frame discard due to in_flight\n");
         return;
     }
 
@@ -320,11 +358,12 @@ do_display_dmabuf(vid_out_env_t * const ve, AVFrame *const frame)
 
     if (wofb == NULL) {
         LOG("Failed to create dmabuf\n");
+        w_buf_free(wbe);
         return;
     }
 
     // **** Maybe better to attach buf delete to wofb delete?
-    wo_fb_on_release_set(wofb, true, w_buffer_release, av_buffer_ref(frame->buf[0]));
+    wo_fb_on_release_set(wofb, true, w_buffer_release, wbe);
 
     wo_surface_attach_fb(ve->vid, wofb, box_rect(ve->vid_par_num, ve->vid_par_den, ve->win_rect));
 }
@@ -850,6 +889,12 @@ vidout_wayland_modeset(vid_out_env_t *vc, int w, int h, AVRational frame_rate)
     (void)h;
     (void)frame_rate;
     /* NIF */
+}
+
+int
+vidout_wayland_in_flight(const vid_out_env_t * vc)
+{
+    return atomic_load(&vc->in_flight);
 }
 
 int
