@@ -15,6 +15,9 @@ epoxy_dep = dependency('epoxy')
 libdrm_dep = dependency('libdrm')
 threads_dep = dependency('threads')
 
+pollqueue_dep = dependency('pollqueue', version : '>=0.1.0',
+	not_found_message : 'pollqueue version incompatible; try "meson subprojects update"')
+
 wl_scanner = find_program('wayland-scanner')
 
 wl_sources = [
@@ -74,7 +77,7 @@ executable('hello_wayland',
   dependencies : [wl_client_dep, wl_protocol_dep, wl_egl_dep, epoxy_dep, libdrm_dep,
     threads_dep,
     dep_rt,
-    subproject('pollqueue').get_variable('pollqueue_dep'),
+    pollqueue_dep,
     dependency('libavcodec'),
     dependency('libavfilter'),
     dependency('libavformat'),
