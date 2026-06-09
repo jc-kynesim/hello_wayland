@@ -28,6 +28,7 @@
 #include "single-pixel-buffer-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "color-representation-v1-client-protocol.h"
 
 #define LOG printf
 
@@ -46,6 +47,7 @@ typedef struct subplane_s {
     struct wl_surface * surface;
     struct wl_subsurface * subsurface;
     struct wp_viewport * viewport;
+    struct wp_color_representation_surface_v1 * color;
 } subplane_t;
 
 #define WO_FB_PLANES 4
@@ -64,6 +66,11 @@ struct wo_fb_s {
     size_t obj_no[WO_FB_PLANES];
     uint64_t mod;
     wo_rect_t crop;   // 16.16 fixed
+
+    int alpha_mode;
+    int color_coefficients;
+    bool color_range;
+    int chroma_location;
 
     struct wl_buffer *way_buf;
 
@@ -144,6 +151,12 @@ struct wo_env_s {
     struct xdg_wm_base *wm_base;
     struct wp_single_pixel_buffer_manager_v1 * single_pixel_manager;
     struct wp_presentation *presentation;
+    struct wp_color_representation_manager_v1 *color_representation;
+
+    unsigned int alpha_support;
+    unsigned int coeff_support;
+    unsigned int range_support; // Indexed by coeff
+
     // Presentation clock id (CLOCK_xxx)
     int presentation_clock_id;
     // Dmabuf fmts
@@ -275,6 +288,16 @@ buffer_destroy(struct wl_buffer ** ppbuffer)
 }
 
 static void
+color_representation_destroy(struct wp_color_representation_surface_v1 ** ppcolor)
+{
+    struct wp_color_representation_surface_v1 * color = *ppcolor;
+    if (color == NULL)
+        return;
+    *ppcolor = NULL;
+    wp_color_representation_surface_v1_destroy(color);
+}
+
+static void
 region_destroy(struct wl_region ** const ppregion)
 {
     if (*ppregion == NULL)
@@ -315,6 +338,7 @@ plane_destroy(subplane_t * const spl)
 {
     viewport_destroy(&spl->viewport);
     subsurface_destroy(&spl->subsurface);
+    color_representation_destroy(&spl->color);
     surface_destroy(&spl->surface);
 }
 
@@ -347,10 +371,24 @@ fail:
 }
 
 // ===========================================================================
+
+static wo_fb_t *
+wofb_new()
+{
+    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    if (wofb == NULL)
+        return NULL;
+
+    wofb->alpha_mode = -1;
+    wofb->color_coefficients = -1;
+    wofb->chroma_location = -1;
+    return wofb;
+}
+
 wo_fb_t *
 wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64_t mod)
 {
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
     struct zwp_linux_buffer_params_v1 *params;
     unsigned int i;
 
@@ -362,6 +400,7 @@ wo_make_fb(wo_env_t * woe, uint32_t width, uint32_t height, uint32_t fmt, uint64
     wofb->width = width;
     wofb->height = height;
     wofb->plane_count = 1;
+
     wofb->stride[0] = width * 4;  // *** Proper fmt calc would be good!
     // Leave crop unset (0 => no crop)
     if ((wofb->dh[0] = dmabuf_alloc(woe->dbsc, height * wofb->stride[0])) == NULL)
@@ -396,7 +435,7 @@ wo_fb_new_dh(wo_env_t * const woe, const uint32_t w, const uint32_t h, uint32_t 
              unsigned int planes, const size_t * offsets, const size_t * strides, const unsigned int * obj_nos)
 {
     struct zwp_linux_buffer_params_v1 *params;
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
     unsigned int i;
 
     if (wofb == NULL)
@@ -440,7 +479,7 @@ fail:
 wo_fb_t *
 wo_fb_new_rgba_pixel(wo_env_t * const woe, const uint32_t r, const uint32_t g, const uint32_t b, const uint32_t a)
 {
-    wo_fb_t * wofb = calloc(1, sizeof(*wofb));
+    wo_fb_t * wofb = wofb_new();
 
     if (wofb == NULL)
         return NULL;
@@ -645,6 +684,44 @@ wo_fb_crop_frac_set(wo_fb_t * wfb, const wo_rect_t crop)
     wfb->crop = crop;
 }
 
+int
+wo_fb_alpha_mode_set(wo_fb_t * wfb, int alpha_mode)
+{
+    if (alpha_mode < 0 || alpha_mode > 31 || !(wfb->woe->alpha_support & (1U << alpha_mode)))
+    {
+        wfb->alpha_mode = -1;
+        return -ENOTSUP;
+    }
+    wfb->alpha_mode = alpha_mode;
+    return 0;
+}
+
+int
+wo_fb_color_coeff_set(wo_fb_t * wfb, int coeff, bool reduced_range)
+{
+    if (coeff < 0 || coeff > 31 || !(wfb->woe->coeff_support & (1U << coeff)))
+    {
+        wfb->color_coefficients = -1;
+        wfb->color_range = 0;
+        return -ENOTSUP;
+    }
+    wfb->color_coefficients = coeff;
+    wfb->color_range = (reduced_range && (wfb->woe->range_support & (1U << coeff)));
+    return 0;
+}
+
+int
+wo_fb_chroma_pos_set(wo_fb_t * wfb, int pos)
+{
+    if (pos < 0 || pos > 31)
+    {
+        wfb->chroma_location = -1;
+        return -ENOTSUP;
+    }
+    wfb->chroma_location = pos;
+    return 0;
+}
+
 void
 wo_fb_write_start(wo_fb_t * wfb)
 {
@@ -772,12 +849,12 @@ surface_attach_fb_cb(void * v, short revents)
     wos->commit0_done = true;
 
     if (a->detach) {
-//        if (wos->wofb != NULL) {
+        if (wos->wofb_weak != NULL) {
             wl_surface_attach(wos->s.surface, NULL, 0, 0);
             wl_surface_damage_buffer(wos->s.surface, 0, 0, INT_MAX, INT_MAX);
             wos->wofb_weak = NULL;
             commit_req_this = true;
-//        }
+        }
     }
     else {
         const bool use_dst = (a->dst_pos.w != 0 && a->dst_pos.h != 0);
@@ -788,7 +865,7 @@ surface_attach_fb_cb(void * v, short revents)
             fb_on_release_setup(wofb);
             commit_req_this = true;
 
-            if (wos->presentation_req || 1) {
+            if (wos->presentation_req) {
                 struct wp_presentation_feedback * feedback =
                     wp_presentation_feedback(wos->woe->presentation, wos->s.surface);
                 wp_presentation_feedback_add_listener(feedback, &presentation_feedback_listener, wo_surface_ref(wos));
@@ -814,6 +891,21 @@ surface_attach_fb_cb(void * v, short revents)
                 wos->src_pos = wofb->crop;
                 commit_req_this = true;
             }
+        }
+        if (wos->woe->color_representation != NULL && wofb != NULL &&
+            (wofb->alpha_mode != -1 || wofb->chroma_location != -1 || wofb->color_coefficients != -1)) {
+            if (wos->s.color == NULL) {
+                wos->s.color = wp_color_representation_manager_v1_get_surface(wos->woe->color_representation, wos->s.surface);
+            }
+            if (wofb->alpha_mode != -1)
+                wp_color_representation_surface_v1_set_alpha_mode(wos->s.color, wofb->alpha_mode);
+            if (wofb->chroma_location != -1)
+                wp_color_representation_surface_v1_set_chroma_location(wos->s.color, wofb->chroma_location);
+            if (wofb->color_coefficients != -1)
+                wp_color_representation_surface_v1_set_coefficients_and_range(wos->s.color, wofb->color_coefficients, wofb->color_range);
+        }
+        else {
+            color_representation_destroy(&wos->s.color);
         }
         if (use_dst) {
             if (wos->dst_pos.w != a->dst_pos.w || wos->dst_pos.h != a->dst_pos.h) {
@@ -1364,6 +1456,90 @@ static const struct wp_presentation_listener presentation_listener = {
     .clock_id = presentation_clock_id,
 };
 
+/**
+ * supported alpha modes
+ *
+ * This event advertises alpha modes that the server supports.
+ * The value represents one alpha mode.
+ *
+ * All the supported values are advertised once when the client
+ * binds to this interface. A roundtrip after binding guarantees
+ * that the client has received all supported values.
+ *
+ * For the definition of the supported values, see the
+ * wp_color_representation_surface_v1::alpha_mode enum.
+ * @param alpha_mode supported alpha mode
+ */
+static void
+wo_color_representation_supported_alpha_mode_cb(void *data,
+                 struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
+                 uint32_t alpha_mode)
+{
+    wo_env_t *const woe = data;
+
+    (void)wp_color_representation_manager_v1;
+
+    if (alpha_mode > 32) {
+        LOG("%s: alpha_mode %d > 31\n", __func__, alpha_mode);
+        return;
+    }
+
+    woe->alpha_support |= 1 << alpha_mode;
+}
+
+/**
+ * supported matrix coefficients and ranges
+ *
+ * This event advertises matrix coefficients the server supports
+ * in combination with a color range. The values usually correspond
+ * to H.273 MatrixCoefficients code points that define a formula
+ * and the related constants used to derive red, green and blue
+ * signals.
+ *
+ * All the supported values are advertised once when the client
+ * binds to this interface. A roundtrip after binding guarantees
+ * that the client has received all supported values.
+ *
+ * For the definition of the supported values, see the
+ * wp_color_representation_surface_v1::coefficients and
+ * wp_color_representation_surface_v1::range enums.
+ * @param coefficients supported matrix coefficients
+ * @param range full range flag
+ */
+static void
+wo_color_representation_supported_coefficients_and_ranges_cb(void *data,
+                      struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1,
+                      uint32_t coefficients,
+                      uint32_t range)
+{
+    wo_env_t *const woe = data;
+
+    (void)wp_color_representation_manager_v1;
+
+    if (coefficients > 32) {
+        LOG("%s: coefficient %d > 31\n", __func__, coefficients);
+        return;
+    }
+
+    woe->coeff_support |= 1 << coefficients;
+    if (range)
+            woe->range_support |= 1 << coefficients;
+}
+
+static void wo_color_representation_done_cb(void *data,
+		     struct wp_color_representation_manager_v1 *wp_color_representation_manager_v1)
+{
+    (void)data;
+    (void)wp_color_representation_manager_v1;
+    return;
+}
+
+static const struct wp_color_representation_manager_v1_listener color_representation_manager_listener = {
+    .supported_alpha_mode = wo_color_representation_supported_alpha_mode_cb,
+    .supported_coefficients_and_ranges = wo_color_representation_supported_coefficients_and_ranges_cb,
+    .done = wo_color_representation_done_cb,
+};
+
 // ---------------------------------------------------------------------------
 
 static void
@@ -1402,6 +1578,10 @@ global_registry_handler(void *data, struct wl_registry *registry, uint32_t id,
     if (strcmp(interface, wp_presentation_interface.name) == 0) {
         woe->presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 1);
         wp_presentation_add_listener(woe->presentation, &presentation_listener, woe);
+    }
+    if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
+        woe->color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
+        wp_color_representation_manager_v1_add_listener(woe->color_representation, &color_representation_manager_listener, woe);
     }
 }
 
@@ -1587,6 +1767,8 @@ pollq_exit(void * v)
         zwp_linux_dmabuf_v1_destroy(woe->linux_dmabuf_v1);
     if (woe->single_pixel_manager)
         wp_single_pixel_buffer_manager_v1_destroy(woe->single_pixel_manager);
+    if (woe->color_representation)
+        wp_color_representation_manager_v1_destroy(woe->color_representation);
     if (woe->subcompositor)
         wl_subcompositor_destroy(woe->subcompositor);
     if (woe->compositor)
