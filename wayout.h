@@ -48,10 +48,10 @@ static inline wo_rect_t
 wo_rect_rescale(const wo_rect_t s, const wo_rect_t mul, const wo_rect_t div)
 {
     return (wo_rect_t){
-        .x = wo_rect_rescale_1s(s.x - div.x, mul.w, div.w) + mul.x,
-        .y = wo_rect_rescale_1s(s.y - div.y, mul.h, div.h) + mul.y,
-        .w = wo_rect_rescale_1u(s.w,         mul.w, div.w),
-        .h = wo_rect_rescale_1u(s.h,         mul.h, div.h)
+        .x = (int32_t)wo_rect_rescale_1s(s.x - div.x, mul.w, div.w) + mul.x,
+        .y = (int32_t)wo_rect_rescale_1s(s.y - div.y, mul.h, div.h) + mul.y,
+        .w = (uint32_t)wo_rect_rescale_1u(s.w,        mul.w, div.w),
+        .h = (uint32_t)wo_rect_rescale_1u(s.h,        mul.h, div.h)
     };
 }
 
